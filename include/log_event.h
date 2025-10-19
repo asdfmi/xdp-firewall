@@ -18,6 +18,12 @@ enum log_verdict {
 	LOG_VERDICT_DROP = 1,
 };
 
+enum log_drop_reason {
+	LOG_DROP_NONE = 0,
+	LOG_DROP_DENY = 1,
+	LOG_DROP_RATELIMIT = 2,
+};
+
 struct log_event {
 	__u64 timestamp_ns;
 	__u32 ifindex;
@@ -34,5 +40,6 @@ struct log_event {
 	__u16 dst_port;
 	__u8  l4_proto;
 	__u8  verdict;
-	__u8  pad[2];
+	__u8  drop_reason;
+	__u8  pad[1];
 };

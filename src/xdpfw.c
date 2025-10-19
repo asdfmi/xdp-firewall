@@ -7,6 +7,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 #include <sys/resource.h>
 #include <unistd.h>
@@ -17,6 +18,7 @@
 
 #include "log_event.h"
 #include "xdp_firewall.skel.h"
+#include "rate_limit.h"
 
 static volatile sig_atomic_t exiting;
 
@@ -25,6 +27,10 @@ struct config {
 	bool enable_log;
 	__u32 *deny_v4;
 	size_t deny_v4_cnt;
+	bool rl_enabled;
+	__u32 rl_max_burst;
+	__u32 rl_window_ms;
+	__u32 rl_ban_ms;
 };
 
 static int libbpf_log_fn(enum libbpf_print_level level,
@@ -104,6 +110,18 @@ static const char *label_ethertype(__u16 ethertype)
 	}
 }
 
+static const char *label_drop_reason(__u8 drop_reason)
+{
+	switch (drop_reason) {
+	case LOG_DROP_DENY:
+		return "deny";
+	case LOG_DROP_RATELIMIT:
+		return "ratelimit";
+	default:
+		return "-";
+	}
+}
+
 static int handle_event(void *ctx, void *data, size_t len)
 {
 	const struct log_event *event = data;
@@ -116,6 +134,7 @@ static int handle_event(void *ctx, void *data, size_t len)
 	const char *service;
 	const char *verdict;
 	const char *ethertype_label;
+	const char *reason_label;
 
 	(void)ctx;
 
@@ -135,8 +154,9 @@ static int handle_event(void *ctx, void *data, size_t len)
 	service = detect_service(event->l4_proto, src_port, dst_port);
 	verdict = event->verdict == LOG_VERDICT_DROP ? "drop" : "pass";
 	ethertype_label = label_ethertype(event->ethertype);
+	reason_label = label_drop_reason(event->drop_reason);
 
-	printf("ts=%llu ifindex=%u len=%u ethertype=0x%04x(%s) src=%s %s:%u dst=%s %s:%u proto=%u svc=%s verdict=%s\n",
+	printf("ts=%llu ifindex=%u len=%u ethertype=0x%04x(%s) src=%s %s:%u dst=%s %s:%u proto=%u svc=%s verdict=%s reason=%s\n",
 	       (unsigned long long)event->timestamp_ns,
 	       event->ifindex,
 	       event->pkt_len,
@@ -150,7 +170,8 @@ static int handle_event(void *ctx, void *data, size_t len)
 	       dst_port,
 	       event->l4_proto,
 	       service,
-	       verdict);
+	       verdict,
+	       reason_label);
 
 	return 0;
 }
@@ -164,6 +185,8 @@ static void usage(const char *prog)
 		"Options:\n"
 		"  --deny-ipv4 <IPv4>   Drop packets with matching source IPv4 (repeatable)\n"
 		"  --deny-ipv6 <IPv6>   Not supported (prints error and exits)\n"
+		"  --ratelimit C/W      Allow at most C packets per W milliseconds (per source IP)\n"
+		"  --ratelimit-ban MS   Ban offending IP for MS milliseconds after burst (optional)\n"
 		"  --no-log             Disable ring-buffer logging\n"
 		"  --help               Show this message\n",
 		prog);
@@ -196,6 +219,10 @@ static int parse_args(int argc, char **argv, struct config *cfg)
 
 	cfg->ifname = argv[1];
 	cfg->enable_log = true;
+	cfg->rl_enabled = false;
+	cfg->rl_max_burst = 0;
+	cfg->rl_window_ms = 0;
+	cfg->rl_ban_ms = 0;
 
 	for (i = 2; i < argc; i++) {
 		if (!strcmp(argv[i], "--deny-ipv4")) {
@@ -216,6 +243,43 @@ static int parse_args(int argc, char **argv, struct config *cfg)
 		} else if (!strcmp(argv[i], "--deny-ipv6")) {
 			fprintf(stderr, "--deny-ipv6 is not supported in this PoC\n");
 			return -1;
+		} else if (!strcmp(argv[i], "--ratelimit")) {
+			char *endptr;
+			unsigned long burst;
+			unsigned long window_ms;
+
+			if (++i >= argc) {
+				fprintf(stderr, "--ratelimit requires <count>/<window_ms>\n");
+				return -1;
+			}
+			burst = strtoul(argv[i], &endptr, 10);
+			if (*endptr != '/' || burst == 0 || burst > UINT32_MAX) {
+				fprintf(stderr, "Invalid --ratelimit format: %s\n", argv[i]);
+				return -1;
+			}
+			window_ms = strtoul(endptr + 1, &endptr, 10);
+			if (*endptr != '\0' || window_ms == 0 || window_ms > UINT32_MAX) {
+				fprintf(stderr, "Invalid --ratelimit window: %s\n", argv[i]);
+				return -1;
+			}
+			cfg->rl_enabled = true;
+			cfg->rl_max_burst = (unsigned int)burst;
+			cfg->rl_window_ms = (unsigned int)window_ms;
+		} else if (!strcmp(argv[i], "--ratelimit-ban")) {
+			char *endptr;
+			unsigned long ban_ms;
+
+			if (++i >= argc) {
+				fprintf(stderr, "--ratelimit-ban requires <milliseconds>\n");
+				return -1;
+			}
+			ban_ms = strtoul(argv[i], &endptr, 10);
+			if (*endptr != '\0' || ban_ms > UINT32_MAX) {
+				fprintf(stderr, "Invalid --ratelimit-ban value: %s\n", argv[i]);
+				return -1;
+			}
+			cfg->rl_enabled = true;
+			cfg->rl_ban_ms = (unsigned int)ban_ms;
 		} else if (!strcmp(argv[i], "--no-log")) {
 			cfg->enable_log = false;
 		} else if (!strcmp(argv[i], "--help")) {
@@ -225,6 +289,11 @@ static int parse_args(int argc, char **argv, struct config *cfg)
 			fprintf(stderr, "Unknown argument: %s\n", argv[i]);
 			return -1;
 		}
+	}
+
+	if (cfg->rl_enabled && (cfg->rl_max_burst == 0 || cfg->rl_window_ms == 0)) {
+		fprintf(stderr, "--ratelimit must be specified when enabling rate limiting\n");
+		return -1;
 	}
 
 	return 0;
@@ -284,6 +353,24 @@ int main(int argc, char **argv)
 		__u8 value = 1;
 
 		if (bpf_map_update_elem(map_fd, &key, &value, 0)) {
+			perror("bpf_map_update_elem");
+			err = EXIT_FAILURE;
+			goto out;
+		}
+	}
+
+	{
+		struct rate_limit_config rl_cfg = {0};
+		__u32 rl_key = 0;
+		int rl_fd = bpf_map__fd(obj->maps.rl_config);
+
+		if (cfg.rl_enabled) {
+			rl_cfg.max_burst = cfg.rl_max_burst;
+			rl_cfg.window_ns = (__u64)cfg.rl_window_ms * 1000000ULL;
+			rl_cfg.ban_ns = (__u64)cfg.rl_ban_ms * 1000000ULL;
+		}
+
+		if (bpf_map_update_elem(rl_fd, &rl_key, &rl_cfg, 0)) {
 			perror("bpf_map_update_elem");
 			err = EXIT_FAILURE;
 			goto out;

@@ -3,6 +3,7 @@
 #include <bpf/bpf_helpers.h>
 
 #include "log_event.h"
+#include "rate_limit.h"
 
 #define ETH_ALEN 6
 #define ETH_P_IP 0x0800
@@ -23,6 +24,20 @@ struct {
 	__type(value, __u8);
 	__uint(max_entries, 1024);
 } deny_v4 SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, __u32);
+	__type(value, struct rate_limit_config);
+	__uint(max_entries, 1);
+} rl_config SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__type(key, __u32);
+	__type(value, struct rate_limit_state);
+	__uint(max_entries, 4096);
+} rl_state SEC(".maps");
 
 static __always_inline int parse_ipv4(void *data, void *data_end, struct log_event *event)
 {
@@ -101,15 +116,58 @@ reserve_event(struct xdp_md *ctx, void *data, void *data_end, struct ethhdr *eth
 }
 
 static __always_inline int apply_ipv4_policy(struct log_event *event, void *data,
-					     void *data_end)
+				     void *data_end)
 {
-	if (!parse_ipv4(data, data_end, event))
-		return XDP_PASS;
+    if (!parse_ipv4(data, data_end, event))
+        return LOG_DROP_NONE;
 
-	if (bpf_map_lookup_elem(&deny_v4, &event->src_ipv4))
-		return XDP_DROP;
+    if (bpf_map_lookup_elem(&deny_v4, &event->src_ipv4))
+        return LOG_DROP_DENY;
 
-	return XDP_PASS;
+    return LOG_DROP_NONE;
+}
+
+static __always_inline int apply_rate_limit(__u32 src_ip, __u64 now_ns)
+{
+	const __u32 cfg_key = 0;
+	struct rate_limit_config *cfg;
+	struct rate_limit_state *st;
+	struct rate_limit_state init_state = {
+		.last_ns = now_ns,
+		.ban_until_ns = 0,
+		.burst = 1,
+	};
+
+	cfg = bpf_map_lookup_elem(&rl_config, &cfg_key);
+	if (!cfg || !cfg->max_burst || !cfg->window_ns)
+		return LOG_DROP_NONE;
+
+	st = bpf_map_lookup_elem(&rl_state, &src_ip);
+	if (!st) {
+		bpf_map_update_elem(&rl_state, &src_ip, &init_state, BPF_ANY);
+		return LOG_DROP_NONE;
+	}
+
+	if (st->ban_until_ns && st->ban_until_ns > now_ns)
+		return LOG_DROP_RATELIMIT;
+
+	if (now_ns >= st->last_ns && now_ns - st->last_ns <= cfg->window_ns) {
+		st->burst++;
+	} else {
+		st->burst = 1;
+		st->last_ns = now_ns;
+		st->ban_until_ns = 0;
+	}
+
+	if (st->burst > cfg->max_burst) {
+		st->burst = 0;
+		st->last_ns = now_ns;
+		if (cfg->ban_ns)
+			st->ban_until_ns = now_ns + cfg->ban_ns;
+		return LOG_DROP_RATELIMIT;
+	}
+
+	return LOG_DROP_NONE;
 }
 
 SEC("xdp")
@@ -126,9 +184,20 @@ int xdp_firewall(struct xdp_md *ctx)
 		return XDP_PASS;
 
 	switch (event->ethertype) {
-	case ETH_P_IP:
-		action = apply_ipv4_policy(event, eth + 1, data_end);
+	case ETH_P_IP: {
+		int deny_reason = apply_ipv4_policy(event, eth + 1, data_end);
+		if (deny_reason == LOG_DROP_NONE) {
+			int rl_reason = apply_rate_limit(event->src_ipv4, event->timestamp_ns);
+			if (rl_reason != LOG_DROP_NONE) {
+				action = XDP_DROP;
+				event->drop_reason = rl_reason;
+			}
+		} else {
+			action = XDP_DROP;
+			event->drop_reason = deny_reason;
+		}
 		break;
+	}
 	default:
 		break;
 	}
