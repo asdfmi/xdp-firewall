@@ -117,12 +117,14 @@ static const char *label_drop_reason(__u8 drop_reason)
 		return "deny";
 	case LOG_DROP_RATELIMIT:
 		return "ratelimit";
+	case LOG_DROP_BACKPRESSURE:
+		return "log-backpressure";
 	default:
 		return "-";
 	}
 }
 
-static int handle_event(void *ctx, void *data, size_t len)
+static void handle_event(void *ctx, int cpu, void *data, __u32 len)
 {
 	const struct log_event *event = data;
 	char src_mac[18];
@@ -137,10 +139,12 @@ static int handle_event(void *ctx, void *data, size_t len)
 	const char *reason_label;
 
 	(void)ctx;
+	(void)cpu;
 
 	if (len < sizeof(*event)) {
-		fprintf(stderr, "Received truncated event (%zu bytes)\n", len);
-		return 0;
+		fprintf(stderr, "Received truncated event (%u bytes)\n",
+		       (unsigned int)len);
+		return;
 	}
 
 	print_mac(src_mac, sizeof(src_mac), event->src_mac);
@@ -172,8 +176,13 @@ static int handle_event(void *ctx, void *data, size_t len)
 	       service,
 	       verdict,
 	       reason_label);
+}
 
-	return 0;
+static void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
+{
+	(void)ctx;
+	fprintf(stderr, "perf buffer lost %llu events on CPU %d\n",
+	       (unsigned long long)lost_cnt, cpu);
 }
 
 static void usage(const char *prog)
@@ -302,7 +311,7 @@ static int parse_args(int argc, char **argv, struct config *cfg)
 int main(int argc, char **argv)
 {
 	struct config cfg = {0};
-	struct ring_buffer *rb = NULL;
+	struct perf_buffer *pb = NULL;
 	struct xdp_firewall_bpf *obj = NULL;
 	bool attached = false;
 	int ifindex, err = 0;
@@ -388,20 +397,28 @@ int main(int argc, char **argv)
 	attached = true;
 
 	if (cfg.enable_log) {
-		rb = ring_buffer__new(bpf_map__fd(obj->maps.rb), handle_event, NULL, NULL);
-		if (!rb) {
-			fprintf(stderr, "Failed to create ring buffer\n");
+		pb = perf_buffer__new(bpf_map__fd(obj->maps.rb), 8,
+				      handle_event, handle_lost_events, NULL, NULL);
+		if (!pb) {
+			fprintf(stderr, "Failed to create perf buffer\n");
+			err = EXIT_FAILURE;
+			goto out;
+		}
+		err = libbpf_get_error(pb);
+		if (err) {
+			fprintf(stderr, "perf_buffer__new failed: %s\n", strerror(-err));
+			pb = NULL;
 			err = EXIT_FAILURE;
 			goto out;
 		}
 
 		while (!exiting) {
-			int ret = ring_buffer__poll(rb, 100);
+			int ret = perf_buffer__poll(pb, 100);
 
 			if (ret == -EINTR || ret == -EAGAIN)
 				break;
 			if (ret < 0) {
-				fprintf(stderr, "ring_buffer__poll failed: %s\n", strerror(-ret));
+				fprintf(stderr, "perf_buffer__poll failed: %s\n", strerror(-ret));
 				err = EXIT_FAILURE;
 				goto out;
 			}
@@ -412,8 +429,8 @@ int main(int argc, char **argv)
 	}
 
 out:
-	if (rb)
-		ring_buffer__free(rb);
+	if (pb)
+		perf_buffer__free(pb);
 
 	if (attached)
 		bpf_xdp_detach(ifindex, XDP_FLAGS_SKB_MODE, NULL);

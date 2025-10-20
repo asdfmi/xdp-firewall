@@ -22,6 +22,7 @@ enum log_drop_reason {
 	LOG_DROP_NONE = 0,
 	LOG_DROP_DENY = 1,
 	LOG_DROP_RATELIMIT = 2,
+	LOG_DROP_BACKPRESSURE = 3,
 };
 
 struct log_event {

@@ -1,6 +1,7 @@
 #include "vmlinux.h"
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
+#include <linux/errno.h>
 
 #include "log_event.h"
 #include "rate_limit.h"
@@ -14,8 +15,10 @@
 char LICENSE[] SEC("license") = "GPL";
 
 struct {
-	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, 1 << 18);
+	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, sizeof(__u32));
+	__uint(max_entries, 0);
 } rb SEC(".maps");
 
 struct {
@@ -85,46 +88,34 @@ static __always_inline int parse_ipv4(void *data, void *data_end, struct log_eve
 	return 1;
 }
 
-static __always_inline void fill_eth(struct ethhdr *eth,
-				    struct log_event *event)
+static __always_inline int init_event(struct xdp_md *ctx, void *data, void *data_end,
+				       struct ethhdr *eth, struct log_event *event)
 {
-	__builtin_memcpy(event->src_mac, eth->h_source, ETH_ALEN);
-	__builtin_memcpy(event->dst_mac, eth->h_dest, ETH_ALEN);
-	event->ethertype = bpf_ntohs(eth->h_proto);
-}
-
-static __always_inline struct log_event *
-reserve_event(struct xdp_md *ctx, void *data, void *data_end, struct ethhdr *eth)
-{
-	struct log_event *event;
-
 	if ((void *)(eth + 1) > data_end)
-		return NULL;
-
-	event = bpf_ringbuf_reserve(&rb, sizeof(*event), 0);
-	if (!event)
-		return NULL;
+		return -1;
 
 	__builtin_memset(event, 0, sizeof(*event));
 	event->timestamp_ns = bpf_ktime_get_ns();
 	event->ifindex = ctx->ingress_ifindex;
 	event->pkt_len = data_end - data;
 
-	fill_eth(eth, event);
+	__builtin_memcpy(event->src_mac, eth->h_source, ETH_ALEN);
+	__builtin_memcpy(event->dst_mac, eth->h_dest, ETH_ALEN);
+	event->ethertype = bpf_ntohs(eth->h_proto);
 
-	return event;
+	return 0;
 }
 
 static __always_inline int apply_ipv4_policy(struct log_event *event, void *data,
-				     void *data_end)
+				      void *data_end)
 {
-    if (!parse_ipv4(data, data_end, event))
-        return LOG_DROP_NONE;
+	if (!parse_ipv4(data, data_end, event))
+		return LOG_DROP_NONE;
 
-    if (bpf_map_lookup_elem(&deny_v4, &event->src_ipv4))
-        return LOG_DROP_DENY;
+	if (bpf_map_lookup_elem(&deny_v4, &event->src_ipv4))
+		return LOG_DROP_DENY;
 
-    return LOG_DROP_NONE;
+	return LOG_DROP_NONE;
 }
 
 static __always_inline int apply_rate_limit(__u32 src_ip, __u64 now_ns)
@@ -176,25 +167,25 @@ int xdp_firewall(struct xdp_md *ctx)
 	void *data = (void *)(long)ctx->data;
 	void *data_end = (void *)(long)ctx->data_end;
 	struct ethhdr *eth = data;
-	struct log_event *event;
+	struct log_event event;
 	int action = XDP_PASS;
+	int err;
 
-	event = reserve_event(ctx, data, data_end, eth);
-	if (!event)
+	if (init_event(ctx, data, data_end, eth, &event))
 		return XDP_PASS;
 
-	switch (event->ethertype) {
+	switch (event.ethertype) {
 	case ETH_P_IP: {
-		int deny_reason = apply_ipv4_policy(event, eth + 1, data_end);
+		int deny_reason = apply_ipv4_policy(&event, eth + 1, data_end);
 		if (deny_reason == LOG_DROP_NONE) {
-			int rl_reason = apply_rate_limit(event->src_ipv4, event->timestamp_ns);
+			int rl_reason = apply_rate_limit(event.src_ipv4, event.timestamp_ns);
 			if (rl_reason != LOG_DROP_NONE) {
 				action = XDP_DROP;
-				event->drop_reason = rl_reason;
+				event.drop_reason = rl_reason;
 			}
 		} else {
 			action = XDP_DROP;
-			event->drop_reason = deny_reason;
+			event.drop_reason = deny_reason;
 		}
 		break;
 	}
@@ -202,9 +193,15 @@ int xdp_firewall(struct xdp_md *ctx)
 		break;
 	}
 
-	event->verdict = action == XDP_DROP ? LOG_VERDICT_DROP : LOG_VERDICT_PASS;
+	event.verdict = action == XDP_DROP ? LOG_VERDICT_DROP : LOG_VERDICT_PASS;
 
-	bpf_ringbuf_submit(event, 0);
+	err = bpf_perf_event_output(ctx, &rb, BPF_F_CURRENT_CPU, &event, sizeof(event));
+	if ((err == -ENOSPC || err == -EOVERFLOW) && action != XDP_DROP) {
+		action = XDP_DROP;
+		event.drop_reason = LOG_DROP_BACKPRESSURE;
+		event.verdict = LOG_VERDICT_DROP;
+		bpf_perf_event_output(ctx, &rb, BPF_F_CURRENT_CPU, &event, sizeof(event));
+	}
 
 	return action;
 }
