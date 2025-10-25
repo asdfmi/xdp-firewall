@@ -1,4 +1,1 @@
 build/
-*.o
-*.skel.h
-vmlinux.h
