@@ -34,7 +34,7 @@ struct log_print_context {
 	bool saw_event;
 };
 
-static void log_event_cb(struct xdt_telemetry_packet *pkt, void *user_data)
+static void log_event_cb(struct xdp_telemetry_packet *pkt, void *user_data)
 {
 	struct log_print_context *state = user_data;
 	char src_ip[INET_ADDRSTRLEN] = "-";
@@ -126,7 +126,7 @@ out_print:
 int do_log(const void *cfg, __unused const char *pin_root_path)
 {
 	const struct logopt *opt = cfg;
-	struct xdt_telemetry_attach_opts lib_opts = {
+	struct xdp_telemetry_attach_opts lib_opts = {
 		.pin_maps = true,
 		.pin_maps_set = true,
 		.pin_path = PIN_DIR,
@@ -135,8 +135,8 @@ int do_log(const void *cfg, __unused const char *pin_root_path)
 		.filter_ifindex = opt->iface.ifindex,
 		.saw_event = false,
 	};
-	struct xdt_telemetry_device *device = NULL;
-	struct xdt_telemetry_event_session *events = NULL;
+	struct xdp_telemetry_device *device = NULL;
+	struct xdp_telemetry_event_session *events = NULL;
 	int ctx_err;
 	int err = EXIT_FAILURE;
 	int poll_ret;
@@ -147,9 +147,9 @@ int do_log(const void *cfg, __unused const char *pin_root_path)
 	}
 
 	lib_opts.ifname = opt->iface.ifname;
-	lib_opts.mode = XDT_TELEMETRY_ATTACH_MODE_SKB;
+	lib_opts.mode = XDP_TELEMETRY_ATTACH_MODE_SKB;
 
-	ctx_err = xdt_telemetry_device_open(&device, &lib_opts);
+	ctx_err = xdp_telemetry_device_open(&device, &lib_opts);
 	if (ctx_err) {
 		fprintf(stderr,
 			"log: failed to prepare context for %s: %s\n",
@@ -157,7 +157,7 @@ int do_log(const void *cfg, __unused const char *pin_root_path)
 		return EXIT_FAILURE;
 	}
 
-	ctx_err = xdt_telemetry_event_session_open(device, &events);
+	ctx_err = xdp_telemetry_event_session_open(device, &events);
 	if (ctx_err) {
 		fprintf(stderr,
 			"log: failed to open event session for %s: %s\n",
@@ -165,7 +165,7 @@ int do_log(const void *cfg, __unused const char *pin_root_path)
 		goto out;
 	}
 
-	err = xdt_telemetry_events_subscribe(events, NULL, log_event_cb, &cb_ctx);
+	err = xdp_telemetry_events_subscribe(events, NULL, log_event_cb, &cb_ctx);
 	if (err) {
 		fprintf(stderr,
 			"log: failed to subscribe for events on %s: %s\n",
@@ -177,7 +177,7 @@ int do_log(const void *cfg, __unused const char *pin_root_path)
 		printf("Streaming events from %s (Ctrl+C to stop)\n",
 		       opt->iface.ifname);
 		while (1) {
-			poll_ret = xdt_telemetry_events_poll(events, 1000);
+			poll_ret = xdp_telemetry_events_poll(events, 1000);
 			if (poll_ret == -EINTR)
 				break;
 			if (poll_ret < 0) {
@@ -188,7 +188,7 @@ int do_log(const void *cfg, __unused const char *pin_root_path)
 		}
 		err = EXIT_SUCCESS;
 	} else {
-		poll_ret = xdt_telemetry_events_poll(events, 100);
+		poll_ret = xdp_telemetry_events_poll(events, 100);
 		if (poll_ret == -EINTR) {
 			err = EXIT_SUCCESS;
 		} else if (poll_ret < 0) {
@@ -204,9 +204,9 @@ int do_log(const void *cfg, __unused const char *pin_root_path)
 
 out:
 	if (events) {
-		xdt_telemetry_events_unsubscribe(events);
-		xdt_telemetry_event_session_close(events);
+		xdp_telemetry_events_unsubscribe(events);
+		xdp_telemetry_event_session_close(events);
 	}
-	xdt_telemetry_device_close(device);
+	xdp_telemetry_device_close(device);
 	return err;
 }

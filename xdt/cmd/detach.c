@@ -22,12 +22,12 @@ struct prog_option detach_options[] = {
 int do_detach(const void *cfg, __unused const char *pin_root_path)
 {
 	const struct detachopt *opt = cfg;
-	struct xdt_telemetry_attach_opts lib_opts = {
+	struct xdp_telemetry_attach_opts lib_opts = {
 		.pin_maps = true,
 		.pin_maps_set = true,
 		.pin_path = PIN_DIR,
 	};
-	struct xdt_telemetry_device *device = NULL;
+	struct xdp_telemetry_device *device = NULL;
 	int err;
 
 	if (!opt || !opt->iface.ifname || !opt->iface.ifindex) {
@@ -36,16 +36,16 @@ int do_detach(const void *cfg, __unused const char *pin_root_path)
 	}
 
 	lib_opts.ifname = opt->iface.ifname;
-	lib_opts.mode = XDT_TELEMETRY_ATTACH_MODE_SKB;
+	lib_opts.mode = XDP_TELEMETRY_ATTACH_MODE_SKB;
 
-	err = xdt_telemetry_device_open(&device, &lib_opts);
+	err = xdp_telemetry_device_open(&device, &lib_opts);
 	if (err) {
 		fprintf(stderr, "detach: failed to prepare context for %s: %s\n",
 			opt->iface.ifname, strerror(-err));
 		return EXIT_FAILURE;
 	}
 
-	err = xdt_telemetry_device_detach(device);
+	err = xdp_telemetry_device_detach(device);
 	if (err) {
 		if (err == -ENOENT) {
 		fprintf(stderr,
@@ -56,11 +56,11 @@ int do_detach(const void *cfg, __unused const char *pin_root_path)
 				"detach: failed to detach program on %s: %s\n",
 				opt->iface.ifname, strerror(-err));
 		}
-		xdt_telemetry_device_close(device);
+		xdp_telemetry_device_close(device);
 		return EXIT_FAILURE;
 	}
 
-	xdt_telemetry_device_close(device);
+	xdp_telemetry_device_close(device);
 printf("Detached XDP Telemetry program from %s.\n", opt->iface.ifname);
 	return EXIT_SUCCESS;
 }

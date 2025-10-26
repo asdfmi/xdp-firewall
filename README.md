@@ -4,7 +4,7 @@ This repository contains a monorepo PoC that applies XDP/eBPF to label packets, 
 
 ## Components
 
-- **xdp/** — eBPF program (`xdp/bpf/xdp.bpf.c`) and user-space helpers (`xdp/lib/xdt_telemetry.c`, headers under `xdp/include/`).
+- **xdp/** — eBPF program (`xdp/bpf/xdp.bpf.c`) and user-space helpers (`xdp/lib/xdp_telemetry.c`, headers under `xdp/include/`).
 - **agent/** — `xdt-agent` binary. Attaches to the pinned maps, receives events via `AF_XDP`, reinjects packets, and streams telemetry records over a length-prefixed TCP channel to the central server. Command-line options are parsed inline with the shared params helper.
 - **central/** — Telemetry server. Accepts the length-prefixed telemetry frames, keeps in-memory statistics per agent, exposes `/metrics.json`, and serves the dashboard UI under `central/ui/static/`.
 - **service/** — Minimal HTTP health server that listens on `/healthz`; acts as a placeholder for the protected business application.

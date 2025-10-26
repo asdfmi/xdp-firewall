@@ -1,11 +1,11 @@
 #pragma once
 
-#include "xdt_telemetry.h"
+#include "xdp_telemetry.h"
 
 #define PROG_NAME "xdt"
 #define ERRBUF_SZ 256
-#define DEFAULT_BPF_OBJECT XDT_TELEMETRY_DEFAULT_OBJECT
-#define PIN_DIR XDT_TELEMETRY_PIN_ROOT_DEFAULT
+#define DEFAULT_BPF_OBJECT XDP_TELEMETRY_DEFAULT_OBJECT
+#define PIN_DIR XDP_TELEMETRY_PIN_ROOT_DEFAULT
 
 #ifndef __unused
 #define __unused __attribute__((unused))

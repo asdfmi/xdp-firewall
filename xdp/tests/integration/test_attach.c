@@ -11,7 +11,7 @@
 #include <unistd.h>
 #include <linux/limits.h>
 
-#include "xdt_telemetry.h"
+#include "xdp_telemetry.h"
 
 static void report_failure(const char *stage, int err)
 {
@@ -73,9 +73,9 @@ static int cleanup_pin_root(const char *pin_root, const char *ifname,
 
 int main(void)
 {
-	struct xdt_telemetry_device *device = NULL;
-	struct xdt_telemetry_attach_opts opts = {0};
-	char tmp_bpffs_template[] = "/tmp/xdt_telemetry_bpffs.XXXXXX";
+	struct xdp_telemetry_device *device = NULL;
+	struct xdp_telemetry_attach_opts opts = {0};
+	char tmp_bpffs_template[] = "/tmp/xdp_telemetry_bpffs.XXXXXX";
 	char *pin_root = NULL;
 	bool pin_root_is_tmp_mount = false;
 	char xsks_path[PATH_MAX];
@@ -114,20 +114,20 @@ int main(void)
 
 	memset(&opts, 0, sizeof(opts));
 	opts.ifname = ifname;
-	opts.mode = XDT_TELEMETRY_ATTACH_MODE_SKB;
+	opts.mode = XDP_TELEMETRY_ATTACH_MODE_SKB;
 	opts.pin_maps = true;
 	opts.pin_maps_set = true;
 	opts.pin_path = pin_root;
 
-	err = xdt_telemetry_device_open(&device, &opts);
+	err = xdp_telemetry_device_open(&device, &opts);
 	if (err) {
-		report_failure("xdt_telemetry_device_open", err);
+		report_failure("xdp_telemetry_device_open", err);
 		goto out;
 	}
 
-	err = xdt_telemetry_device_attach(device);
+	err = xdp_telemetry_device_attach(device);
 	if (err) {
-		report_failure("xdt_telemetry_device_attach", err);
+		report_failure("xdp_telemetry_device_attach", err);
 		goto out;
 	}
 	attached = true;
@@ -160,9 +160,9 @@ int main(void)
 		goto out;
 	}
 
-	err = xdt_telemetry_device_detach(device);
+	err = xdp_telemetry_device_detach(device);
 	if (err) {
-		report_failure("xdt_telemetry_device_detach", err);
+		report_failure("xdp_telemetry_device_detach", err);
 		goto out;
 	}
 	attached = false;
@@ -184,8 +184,8 @@ int main(void)
 
 out:
 	if (attached)
-		(void)xdt_telemetry_device_detach(device);
-	xdt_telemetry_device_close(device);
+		(void)xdp_telemetry_device_detach(device);
+	xdp_telemetry_device_close(device);
 	if (pin_root)
 		(void)cleanup_pin_root(pin_root, ifname,
 				       pin_root_is_tmp_mount);

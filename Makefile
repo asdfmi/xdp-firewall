@@ -48,7 +48,7 @@ CLI_SOURCES := \
 	xdt/xdt.c
 
 LIB_SOURCES := \
-	xdp/lib/xdt_telemetry.c
+	xdp/lib/xdp_telemetry.c
 
 AGENT_C_SOURCES := \
 	agent/xdt-agent.c \

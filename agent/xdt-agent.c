@@ -19,7 +19,7 @@
 
 #include "params.h"
 #include "telemetry_client.h"
-#include "xdt_telemetry.h"
+#include "xdp_telemetry.h"
 
 #define AGENT_POLL_TIMEOUT_MS 1000
 #define AGENT_DEFAULT_CENTRAL "127.0.0.1:50051"
@@ -54,7 +54,7 @@ static struct prog_option agent_prog_options[] = {
 	DEFINE_OPTION("pin-root", OPT_STRING, struct agent_cli_config, pin_root,
 		.short_opt = 'p',
 		.metavar = "<path>",
-		.help = "bpffs pin root (default " XDT_TELEMETRY_PIN_ROOT_DEFAULT ")"),
+		.help = "bpffs pin root (default " XDP_TELEMETRY_PIN_ROOT_DEFAULT ")"),
 	DEFINE_OPTION("agent-id", OPT_STRING, struct agent_cli_config, agent_id,
 		.short_opt = 'a',
 		.metavar = "<id>",
@@ -101,7 +101,7 @@ static int agent_options_parse(int argc, char **argv, struct agent_options *opts
 	struct agent_cli_config cfg;
 	struct agent_cli_config defaults = {
 		.central = AGENT_DEFAULT_CENTRAL,
-		.pin_root = XDT_TELEMETRY_PIN_ROOT_DEFAULT,
+		.pin_root = XDP_TELEMETRY_PIN_ROOT_DEFAULT,
 		.agent_id = NULL,
 		.verbose = false,
 	};
@@ -136,7 +136,7 @@ static int agent_options_parse(int argc, char **argv, struct agent_options *opts
 	}
 
 	if (!cfg.pin_root)
-		cfg.pin_root = XDT_TELEMETRY_PIN_ROOT_DEFAULT;
+		cfg.pin_root = XDP_TELEMETRY_PIN_ROOT_DEFAULT;
 	strncpy(opts->pin_root, cfg.pin_root, sizeof(opts->pin_root) - 1);
 	opts->pin_root[sizeof(opts->pin_root) - 1] = '\0';
 
@@ -199,7 +199,7 @@ static void print_packet_stub(const struct telemetry_packet *packet,
 	fflush(stdout);
 }
 
-static void prepare_telemetry_packet(const struct xdt_telemetry_packet *pkt,
+static void prepare_telemetry_packet(const struct xdp_telemetry_packet *pkt,
 				     struct telemetry_packet *out)
 {
 	const unsigned char *data = pkt->data;
@@ -264,7 +264,7 @@ static void prepare_telemetry_packet(const struct xdt_telemetry_packet *pkt,
 	}
 }
 
-static void event_dispatch_cb(struct xdt_telemetry_packet *pkt, void *user_data)
+static void event_dispatch_cb(struct xdp_telemetry_packet *pkt, void *user_data)
 {
 	struct send_context *ctx = user_data;
 	struct telemetry_packet packet;
@@ -299,17 +299,17 @@ static void event_dispatch_cb(struct xdt_telemetry_packet *pkt, void *user_data)
 
 static int run_agent(const struct agent_options *opts)
 {
-	struct xdt_telemetry_device *device = NULL;
-	struct xdt_telemetry_event_session *events = NULL;
+	struct xdp_telemetry_device *device = NULL;
+	struct xdp_telemetry_event_session *events = NULL;
 	struct send_context send_ctx = {
 		.opts = opts,
 		.client = NULL,
 		.verbose = opts->verbose,
 		.warned_client = false,
 	};
-	struct xdt_telemetry_attach_opts attach_opts = {
+	struct xdp_telemetry_attach_opts attach_opts = {
 		.ifname = opts->ifname,
-		.mode = XDT_TELEMETRY_ATTACH_MODE_SKB,
+		.mode = XDP_TELEMETRY_ATTACH_MODE_SKB,
 		.pin_maps = true,
 		.pin_maps_set = true,
 		.pin_path = opts->pin_root,
@@ -323,21 +323,21 @@ static int run_agent(const struct agent_options *opts)
             opts->central_host, opts->central_port);
     }
 
-	err = xdt_telemetry_device_open(&device, &attach_opts);
+	err = xdp_telemetry_device_open(&device, &attach_opts);
 	if (err) {
 		fprintf(stderr, "agent: failed to prepare device context: %s\n",
 			strerror(-err));
 		return EXIT_FAILURE;
 	}
 
-	err = xdt_telemetry_event_session_open(device, &events);
+	err = xdp_telemetry_event_session_open(device, &events);
 	if (err) {
 		fprintf(stderr, "agent: failed to open event session: %s\n",
 			strerror(-err));
 		goto out;
 	}
 
-	err = xdt_telemetry_events_subscribe(events, NULL,
+	err = xdp_telemetry_events_subscribe(events, NULL,
 					    event_dispatch_cb, &send_ctx);
 	if (err) {
 		fprintf(stderr, "agent: failed to subscribe to events: %s\n",
@@ -346,7 +346,7 @@ static int run_agent(const struct agent_options *opts)
 	}
 
 	while (!stop_agent) {
-		err = xdt_telemetry_events_poll(events, AGENT_POLL_TIMEOUT_MS);
+		err = xdp_telemetry_events_poll(events, AGENT_POLL_TIMEOUT_MS);
 		if (err == -EINTR)
 			break;
 		if (err < 0) {
@@ -356,12 +356,12 @@ static int run_agent(const struct agent_options *opts)
 		}
 	}
 
-	xdt_telemetry_events_unsubscribe(events);
+	xdp_telemetry_events_unsubscribe(events);
 
 out:
 	if (events)
-		xdt_telemetry_event_session_close(events);
-	xdt_telemetry_device_close(device);
+		xdp_telemetry_event_session_close(events);
+	xdp_telemetry_device_close(device);
 	telemetry_client_destroy(send_ctx.client);
 	return err ? EXIT_FAILURE : EXIT_SUCCESS;
 }

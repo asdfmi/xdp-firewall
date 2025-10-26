@@ -111,15 +111,15 @@ struct prog_option add_options[] = {
 int do_add(const void *cfg, __unused const char *pin_root_path)
 {
 	const struct addopt *opt = cfg;
-	struct xdt_telemetry_attach_opts lib_opts = {
+	struct xdp_telemetry_attach_opts lib_opts = {
 		.pin_maps = true,
 		.pin_maps_set = true,
 		.pin_path = PIN_DIR,
 	};
-	struct xdt_telemetry_device *device = NULL;
-	struct xdt_telemetry_rule_session *rules = NULL;
+	struct xdp_telemetry_device *device = NULL;
+	struct xdp_telemetry_rule_session *rules = NULL;
 	struct lpm_v4_key key = {};
-	struct xdt_telemetry_rule rule = {};
+	struct xdp_telemetry_rule rule = {};
 	unsigned long label_ul;
 	char *endptr;
 	int ctx_err;
@@ -140,9 +140,9 @@ int do_add(const void *cfg, __unused const char *pin_root_path)
 	}
 
 	lib_opts.ifname = opt->iface.ifname;
-	lib_opts.mode = XDT_TELEMETRY_ATTACH_MODE_SKB;
+	lib_opts.mode = XDP_TELEMETRY_ATTACH_MODE_SKB;
 
-	ctx_err = xdt_telemetry_device_open(&device, &lib_opts);
+	ctx_err = xdp_telemetry_device_open(&device, &lib_opts);
 	if (ctx_err) {
 		fprintf(stderr,
 			"add: failed to prepare context for %s: %s\n",
@@ -150,7 +150,7 @@ int do_add(const void *cfg, __unused const char *pin_root_path)
 		return EXIT_FAILURE;
 	}
 
-	ctx_err = xdt_telemetry_rule_session_open(device, &rules);
+	ctx_err = xdp_telemetry_rule_session_open(device, &rules);
 	if (ctx_err) {
 		fprintf(stderr,
 			"add: failed to open rule session for %s: %s\n",
@@ -178,7 +178,7 @@ int do_add(const void *cfg, __unused const char *pin_root_path)
 
 		rule.key = key;
 
-		rc = xdt_telemetry_rule_upsert(rules, &rule);
+		rc = xdp_telemetry_rule_upsert(rules, &rule);
 		if (rc) {
 			if (!opt->replace && rc == -EEXIST) {
 				fprintf(stderr,
@@ -202,8 +202,8 @@ int do_add(const void *cfg, __unused const char *pin_root_path)
 	err = EXIT_SUCCESS;
 
 out:
-	xdt_telemetry_rule_session_close(rules);
-	xdt_telemetry_device_close(device);
+	xdp_telemetry_rule_session_close(rules);
+	xdp_telemetry_device_close(device);
 
 	if (opt) {
 		struct string_list *list = (struct string_list *)&opt->cidrs;

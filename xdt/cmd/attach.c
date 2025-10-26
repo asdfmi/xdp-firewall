@@ -10,13 +10,13 @@
 #include "xdt.h"
 
 static const struct enum_val attach_modes[] = {
-	{ "skb", XDT_TELEMETRY_ATTACH_MODE_SKB },
-	{ "native", XDT_TELEMETRY_ATTACH_MODE_NATIVE },
+	{ "skb", XDP_TELEMETRY_ATTACH_MODE_SKB },
+	{ "native", XDP_TELEMETRY_ATTACH_MODE_NATIVE },
 	{ NULL, 0 },
 };
 
 const struct attachopt defaults_attach = {
-	.mode = XDT_TELEMETRY_ATTACH_MODE_SKB,
+	.mode = XDP_TELEMETRY_ATTACH_MODE_SKB,
 	.object_path = DEFAULT_BPF_OBJECT,
 };
 
@@ -40,12 +40,12 @@ struct prog_option attach_options[] = {
 int do_attach(const void *cfg, __unused const char *pin_root_path)
 {
 	const struct attachopt *opt = cfg;
-	struct xdt_telemetry_attach_opts lib_opts = {
+	struct xdp_telemetry_attach_opts lib_opts = {
 		.pin_maps = true,
 		.pin_maps_set = true,
 		.pin_path = PIN_DIR,
 	};
-	struct xdt_telemetry_device *device = NULL;
+	struct xdp_telemetry_device *device = NULL;
 	int err;
 
 	if (!opt || !opt->iface.ifname || !opt->iface.ifindex) {
@@ -59,22 +59,22 @@ int do_attach(const void *cfg, __unused const char *pin_root_path)
 				   : DEFAULT_BPF_OBJECT;
 	lib_opts.mode = opt->mode;
 
-	err = xdt_telemetry_device_open(&device, &lib_opts);
+	err = xdp_telemetry_device_open(&device, &lib_opts);
 	if (err) {
 		fprintf(stderr, "attach: failed to prepare context for %s: %s\n",
 			opt->iface.ifname, strerror(-err));
 		return EXIT_FAILURE;
 	}
 
-	err = xdt_telemetry_device_attach(device);
+	err = xdp_telemetry_device_attach(device);
 	if (err) {
 		fprintf(stderr, "attach: failed to attach program on %s: %s\n",
 			opt->iface.ifname, strerror(-err));
-		xdt_telemetry_device_close(device);
+		xdp_telemetry_device_close(device);
 		return EXIT_FAILURE;
 	}
 
-	xdt_telemetry_device_close(device);
+	xdp_telemetry_device_close(device);
 printf("Attached XDP Telemetry program to %s.\n", opt->iface.ifname);
 	return EXIT_SUCCESS;
 }
