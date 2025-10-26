@@ -84,12 +84,3 @@ Before applying, adapt the following to your cluster:
 
 - `/metrics.json` returns `{ total_events, nodes: [ { agent_id, total_events, label_counts[], recent_events[] } ] }`.
 - The UI (served at `/`) fetches JSON every second, renders per-agent bar charts (label distribution), a timeline chart (payload size vs timestamp), and a table of recent events.
-
-## Limitations (PoC)
-
-- Telemetry is in-memory only; counters reset if `central` restarts.
-- No authentication or TLS on the telemetry TCP stream or HTTP UI.
-- Only IPv4 LPM rules are supported; no advanced analytics.
-- eBPF program attaches in XDP SKB mode for portability; zero-copy requires native-mode NIC support.
-
-Use this PoC as a starting point for production hardening (persistence, auth, multi-cluster orchestration, richer analytics, etc.).
