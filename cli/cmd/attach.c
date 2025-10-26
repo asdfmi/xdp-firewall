@@ -7,16 +7,16 @@
 #include <linux/limits.h>
 
 #include "cli_shared.h"
-#include "xdp-labeling.h"
+#include "xdt.h"
 
 static const struct enum_val attach_modes[] = {
-	{ "skb", XDP_LABELING_ATTACH_MODE_SKB },
-	{ "native", XDP_LABELING_ATTACH_MODE_NATIVE },
+	{ "skb", XDT_TELEMETRY_ATTACH_MODE_SKB },
+	{ "native", XDT_TELEMETRY_ATTACH_MODE_NATIVE },
 	{ NULL, 0 },
 };
 
 const struct attachopt defaults_attach = {
-	.mode = XDP_LABELING_ATTACH_MODE_SKB,
+	.mode = XDT_TELEMETRY_ATTACH_MODE_SKB,
 	.object_path = DEFAULT_BPF_OBJECT,
 };
 
@@ -40,12 +40,12 @@ struct prog_option attach_options[] = {
 int do_attach(const void *cfg, __unused const char *pin_root_path)
 {
 	const struct attachopt *opt = cfg;
-	struct xdp_labeling_attach_opts lib_opts = {
+	struct xdt_telemetry_attach_opts lib_opts = {
 		.pin_maps = true,
 		.pin_maps_set = true,
 		.pin_path = PIN_DIR,
 	};
-	struct xdp_labeling_device *device = NULL;
+	struct xdt_telemetry_device *device = NULL;
 	int err;
 
 	if (!opt || !opt->iface.ifname || !opt->iface.ifindex) {
@@ -59,22 +59,22 @@ int do_attach(const void *cfg, __unused const char *pin_root_path)
 				   : DEFAULT_BPF_OBJECT;
 	lib_opts.mode = opt->mode;
 
-	err = xdp_labeling_device_open(&device, &lib_opts);
+	err = xdt_telemetry_device_open(&device, &lib_opts);
 	if (err) {
 		fprintf(stderr, "attach: failed to prepare context for %s: %s\n",
 			opt->iface.ifname, strerror(-err));
 		return EXIT_FAILURE;
 	}
 
-	err = xdp_labeling_device_attach(device);
+	err = xdt_telemetry_device_attach(device);
 	if (err) {
 		fprintf(stderr, "attach: failed to attach program on %s: %s\n",
 			opt->iface.ifname, strerror(-err));
-		xdp_labeling_device_close(device);
+		xdt_telemetry_device_close(device);
 		return EXIT_FAILURE;
 	}
 
-	xdp_labeling_device_close(device);
-	printf("Attached XDP program to %s.\n", opt->iface.ifname);
+	xdt_telemetry_device_close(device);
+printf("Attached XDP Telemetry program to %s.\n", opt->iface.ifname);
 	return EXIT_SUCCESS;
 }

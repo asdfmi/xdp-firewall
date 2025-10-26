@@ -10,7 +10,7 @@
 #include <stdint.h>
 
 #include "cli_shared.h"
-#include "xdp-labeling.h"
+#include "xdt.h"
 #include "rule.h"
 
 static const char *action_to_str(__u32 action)
@@ -33,8 +33,8 @@ static const char *action_to_str(__u32 action)
 
 static int rule_entry_cmp(const void *a, const void *b)
 {
-	const struct xdp_labeling_rule *ra = a;
-	const struct xdp_labeling_rule *rb = b;
+	const struct xdt_telemetry_rule *ra = a;
+	const struct xdt_telemetry_rule *rb = b;
 
 	if (ra->label_id != rb->label_id)
 		return (ra->label_id > rb->label_id) -
@@ -65,14 +65,14 @@ struct prog_option list_options[] = {
 int do_list(const void *cfg, __unused const char *pin_root_path)
 {
 	const struct listopt *opt = cfg;
-	struct xdp_labeling_attach_opts lib_opts = {
+	struct xdt_telemetry_attach_opts lib_opts = {
 		.pin_maps = true,
 		.pin_maps_set = true,
 		.pin_path = PIN_DIR,
 	};
-	struct xdp_labeling_rule_list list = {};
-	struct xdp_labeling_device *device = NULL;
-	struct xdp_labeling_rule_session *rules = NULL;
+	struct xdt_telemetry_rule_list list = {};
+	struct xdt_telemetry_device *device = NULL;
+	struct xdt_telemetry_rule_session *rules = NULL;
 	char addr_buf[INET_ADDRSTRLEN];
 	int ctx_err;
 	int err = EXIT_FAILURE;
@@ -84,9 +84,9 @@ int do_list(const void *cfg, __unused const char *pin_root_path)
 	}
 
 	lib_opts.ifname = opt->iface.ifname;
-	lib_opts.mode = XDP_LABELING_ATTACH_MODE_SKB;
+	lib_opts.mode = XDT_TELEMETRY_ATTACH_MODE_SKB;
 
-	ctx_err = xdp_labeling_device_open(&device, &lib_opts);
+	ctx_err = xdt_telemetry_device_open(&device, &lib_opts);
 	if (ctx_err) {
 		fprintf(stderr,
 			"list: failed to prepare context for %s: %s\n",
@@ -94,7 +94,7 @@ int do_list(const void *cfg, __unused const char *pin_root_path)
 		return EXIT_FAILURE;
 	}
 
-	ctx_err = xdp_labeling_rule_session_open(device, &rules);
+	ctx_err = xdt_telemetry_rule_session_open(device, &rules);
 	if (ctx_err) {
 		fprintf(stderr,
 			"list: failed to open rule session for %s: %s\n",
@@ -105,7 +105,7 @@ int do_list(const void *cfg, __unused const char *pin_root_path)
 
 	printf("Rules on %s:\n", opt->iface.ifname);
 
-	err = xdp_labeling_rule_list(rules, &list);
+	err = xdt_telemetry_rule_list(rules, &list);
 	if (err) {
 		fprintf(stderr, "list: failed to read rules: %s\n",
 			strerror(-err));
@@ -148,8 +148,8 @@ int do_list(const void *cfg, __unused const char *pin_root_path)
 	err = EXIT_SUCCESS;
 
 out:
-	xdp_labeling_rule_list_free(&list);
-	xdp_labeling_rule_session_close(rules);
-	xdp_labeling_device_close(device);
+	xdt_telemetry_rule_list_free(&list);
+	xdt_telemetry_rule_session_close(rules);
+	xdt_telemetry_device_close(device);
 	return err;
 }

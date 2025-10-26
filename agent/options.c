@@ -9,14 +9,14 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "xdp_labeling.h"
+#include "xdt_telemetry.h"
 
 static void set_defaults(struct agent_options *opts)
 {
 	memset(opts, 0, sizeof(*opts));
 	strncpy(opts->central_host, "127.0.0.1", sizeof(opts->central_host) - 1);
 	opts->central_port = 50051;
-	strncpy(opts->pin_root, XDP_LABELING_PIN_ROOT_DEFAULT,
+	strncpy(opts->pin_root, XDT_TELEMETRY_PIN_ROOT_DEFAULT,
 		sizeof(opts->pin_root) - 1);
 	if (gethostname(opts->agent_id, sizeof(opts->agent_id) - 1) != 0)
 		opts->agent_id[0] = '\0';
@@ -67,7 +67,7 @@ void agent_options_print_usage(const char *prog)
 		"  -a, --agent-id <id>       Identifier reported to central (default hostname)\n"
 		"  -v, --verbose              Enable verbose logging\n"
 		"  -h, --help                 Show this help\n",
-		prog, XDP_LABELING_PIN_ROOT_DEFAULT);
+		prog, XDT_TELEMETRY_PIN_ROOT_DEFAULT);
 }
 
 int agent_options_parse(int argc, char **argv, struct agent_options *opts)

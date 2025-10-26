@@ -3,15 +3,15 @@
 #include <string.h>
 
 #include "cli_shared.h"
-#include "xdp-labeling.h"
+#include "xdt.h"
 #include "params.h"
 
 const struct prog_command cmds[] = {
-	DEFINE_COMMAND(attach, "Attach XDP program to an interface"),
-	DEFINE_COMMAND(detach, "Detach XDP program from an interface"),
-	DEFINE_COMMAND(add, "Add IPv4 labeling rule"),
-	DEFINE_COMMAND(list, "List label map entries"),
-	DEFINE_COMMAND(log, "Stream label events"),
+	DEFINE_COMMAND(attach, "Attach XDP Telemetry program to an interface"),
+	DEFINE_COMMAND(detach, "Detach XDP Telemetry program from an interface"),
+	DEFINE_COMMAND(add, "Add IPv4 telemetry rule"),
+	DEFINE_COMMAND(list, "List telemetry rules"),
+	DEFINE_COMMAND(log, "Stream telemetry events"),
 	DEFINE_COMMAND(help, "Show help message"),
 	END_COMMANDS
 };

@@ -37,19 +37,19 @@
 #define XDP_USE_NEED_WAKEUP 0
 #endif
 
-#include "xdp_labeling.h"
+#include "xdt_telemetry.h"
 
-struct xdp_labeling_device {
+struct xdt_telemetry_device {
 	char ifname[IF_NAMESIZE];
 	unsigned int ifindex;
 	char prog_path[PATH_MAX];
-	enum xdp_labeling_attach_mode mode;
+	enum xdt_telemetry_attach_mode mode;
 	bool pin_maps;
 	char pin_root[PATH_MAX];
 };
 
-struct xdp_labeling_rule_session {
-	const struct xdp_labeling_device *device;
+struct xdt_telemetry_rule_session {
+	const struct xdt_telemetry_device *device;
 	int rules_map_fd;
 };
 
@@ -59,8 +59,8 @@ struct xdp_labeling_rule_session {
 #define XSK_BATCH_SIZE 64u
 #define XSK_FRAME_HEADROOM 256u
 
-struct xdp_labeling_event_session {
-	const struct xdp_labeling_device *device;
+struct xdt_telemetry_event_session {
+	const struct xdt_telemetry_device *device;
 	int xsks_map_fd;
 
 	struct xsk_umem *umem;
@@ -75,7 +75,7 @@ struct xdp_labeling_event_session {
 	struct xsk_ring_prod tx;
 	int xsk_fd;
 
-	xdp_labeling_event_cb event_cb;
+	xdt_telemetry_event_cb event_cb;
 	void *event_user_data;
 
 	__u32 *event_filter_label_ids;
@@ -86,7 +86,7 @@ static const char *pin_root_or_default(const char *pin_root)
 {
 	if (pin_root && pin_root[0])
 		return pin_root;
-	return XDP_LABELING_PIN_ROOT_DEFAULT;
+	return XDT_TELEMETRY_PIN_ROOT_DEFAULT;
 }
 
 static int ensure_pin_dir(const char *pin_root)
@@ -114,12 +114,12 @@ static int build_map_path(const char *pin_root, const char *ifname,
 	return 0;
 }
 
-static int ensure_rules_map_fd(struct xdp_labeling_rule_session *session)
+static int ensure_rules_map_fd(struct xdt_telemetry_rule_session *session)
 {
 	char path[PATH_MAX];
 	int fd;
 	int err;
-	const struct xdp_labeling_device *device;
+	const struct xdt_telemetry_device *device;
 
 	if (!session || !session->device)
 		return -EINVAL;
@@ -142,7 +142,7 @@ static int ensure_rules_map_fd(struct xdp_labeling_rule_session *session)
 	return session->rules_map_fd;
 }
 
-static void close_rules_map_fd(struct xdp_labeling_rule_session *session)
+static void close_rules_map_fd(struct xdt_telemetry_rule_session *session)
 {
 	if (session && session->rules_map_fd >= 0) {
 		close(session->rules_map_fd);
@@ -150,7 +150,7 @@ static void close_rules_map_fd(struct xdp_labeling_rule_session *session)
 	}
 }
 
-static void close_xsks_map_fd(struct xdp_labeling_event_session *session)
+static void close_xsks_map_fd(struct xdt_telemetry_event_session *session)
 {
 	if (session && session->xsks_map_fd >= 0) {
 		close(session->xsks_map_fd);
@@ -158,7 +158,7 @@ static void close_xsks_map_fd(struct xdp_labeling_event_session *session)
 	}
 }
 
-static void detach_xsk_from_map(struct xdp_labeling_event_session *session)
+static void detach_xsk_from_map(struct xdt_telemetry_event_session *session)
 {
 	if (!session || session->xsks_map_fd < 0)
 		return;
@@ -166,7 +166,7 @@ static void detach_xsk_from_map(struct xdp_labeling_event_session *session)
 	(void)bpf_map_delete_elem(session->xsks_map_fd, &session->queue_id);
 }
 
-static void destroy_event_transport(struct xdp_labeling_event_session *session)
+static void destroy_event_transport(struct xdt_telemetry_event_session *session)
 {
 	if (!session)
 		return;
@@ -201,10 +201,10 @@ static void copy_string(char *dst, size_t dst_sz, const char *src)
 	dst[dst_sz - 1] = '\0';
 }
 
-int xdp_labeling_device_open(struct xdp_labeling_device **devicep,
-			     const struct xdp_labeling_attach_opts *attach_opts)
+int xdt_telemetry_device_open(struct xdt_telemetry_device **devicep,
+			     const struct xdt_telemetry_attach_opts *attach_opts)
 {
-	struct xdp_labeling_device *device;
+	struct xdt_telemetry_device *device;
 
 	if (!devicep)
 		return -EINVAL;
@@ -213,7 +213,7 @@ int xdp_labeling_device_open(struct xdp_labeling_device **devicep,
 	if (!device)
 		return -ENOMEM;
 
-	device->mode = XDP_LABELING_ATTACH_MODE_SKB;
+	device->mode = XDT_TELEMETRY_ATTACH_MODE_SKB;
 	device->pin_maps = true;
 
 	if (attach_opts) {
@@ -241,14 +241,14 @@ int xdp_labeling_device_open(struct xdp_labeling_device **devicep,
 	return 0;
 }
 
-void xdp_labeling_device_close(struct xdp_labeling_device *device)
+void xdt_telemetry_device_close(struct xdt_telemetry_device *device)
 {
 	if (!device)
 		return;
 	free(device);
 }
 
-int xdp_labeling_device_attach(const struct xdp_labeling_device *device)
+int xdt_telemetry_device_attach(const struct xdt_telemetry_device *device)
 {
 	char rules_path[PATH_MAX];
 	char xsks_path[PATH_MAX];
@@ -273,7 +273,7 @@ int xdp_labeling_device_attach(const struct xdp_labeling_device *device)
 	}
 
 	obj_path = device->prog_path[0] ? device->prog_path :
-					  XDP_LABELING_DEFAULT_OBJECT;
+					  XDT_TELEMETRY_DEFAULT_OBJECT;
 
 	obj = bpf_object__open_file(obj_path, NULL);
 	if (!obj)
@@ -282,7 +282,7 @@ int xdp_labeling_device_attach(const struct xdp_labeling_device *device)
 	rules_map = bpf_object__find_map_by_name(obj, "rules_v4");
 	if (!rules_map) {
 		fprintf(stderr,
-			"xdp_labeling_attach: rules_v4 map not found in object\n");
+			"xdt_telemetry_attach: rules_v4 map not found in object\n");
 		err = -ENOENT;
 		goto out_close;
 	}
@@ -290,7 +290,7 @@ int xdp_labeling_device_attach(const struct xdp_labeling_device *device)
 	xsks_map = bpf_object__find_map_by_name(obj, "xsks_map");
 	if (!xsks_map) {
 		fprintf(stderr,
-			"xdp_labeling_attach: xsks_map not found in object\n");
+			"xdt_telemetry_attach: xsks_map not found in object\n");
 		err = -ENOENT;
 		goto out_close;
 	}
@@ -305,7 +305,7 @@ int xdp_labeling_device_attach(const struct xdp_labeling_device *device)
 		unlink(rules_path);
 		if (bpf_map__set_pin_path(rules_map, rules_path)) {
 			fprintf(stderr,
-				"xdp_labeling_attach: failed to set pin path for rules_v4 map\n");
+				"xdt_telemetry_attach: failed to set pin path for rules_v4 map\n");
 			err = -errno;
 			goto out_close;
 		}
@@ -318,7 +318,7 @@ int xdp_labeling_device_attach(const struct xdp_labeling_device *device)
 		unlink(xsks_path);
 		if (bpf_map__set_pin_path(xsks_map, xsks_path)) {
 			fprintf(stderr,
-				"xdp_labeling_attach: failed to set pin path for xsks map\n");
+				"xdt_telemetry_attach: failed to set pin path for xsks map\n");
 			err = -errno;
 			goto out_close;
 		}
@@ -340,7 +340,7 @@ int xdp_labeling_device_attach(const struct xdp_labeling_device *device)
 		goto out_close;
 	}
 
-	flags = device->mode == XDP_LABELING_ATTACH_MODE_NATIVE ?
+	flags = device->mode == XDT_TELEMETRY_ATTACH_MODE_NATIVE ?
 			XDP_FLAGS_DRV_MODE : XDP_FLAGS_SKB_MODE;
 
 	err = bpf_xdp_attach(device->ifindex, prog_fd, flags, NULL);
@@ -354,7 +354,7 @@ out_close:
 	return err;
 }
 
-int xdp_labeling_device_detach(const struct xdp_labeling_device *device)
+int xdt_telemetry_device_detach(const struct xdt_telemetry_device *device)
 {
 	char rules_path[PATH_MAX];
 	char xsks_path[PATH_MAX];
@@ -364,7 +364,7 @@ int xdp_labeling_device_detach(const struct xdp_labeling_device *device)
 	if (!device || !device->ifindex)
 		return -EINVAL;
 
-	flags = device->mode == XDP_LABELING_ATTACH_MODE_NATIVE ?
+	flags = device->mode == XDT_TELEMETRY_ATTACH_MODE_NATIVE ?
 			XDP_FLAGS_DRV_MODE : XDP_FLAGS_SKB_MODE;
 
 	err = bpf_xdp_detach(device->ifindex, flags, NULL);
@@ -376,14 +376,14 @@ int xdp_labeling_device_detach(const struct xdp_labeling_device *device)
 				    rules_path, sizeof(rules_path)) &&
 		    unlink(rules_path) && errno != ENOENT) {
 			fprintf(stderr,
-				"xdp_labeling_detach: warning: failed to unlink %s: %s\n",
+				"xdt_telemetry_detach: warning: failed to unlink %s: %s\n",
 				rules_path, strerror(errno));
 		}
 		if (!build_map_path(device->pin_root, device->ifname, "xsks",
 				    xsks_path, sizeof(xsks_path)) &&
 		    unlink(xsks_path) && errno != ENOENT) {
 			fprintf(stderr,
-				"xdp_labeling_detach: warning: failed to unlink %s: %s\n",
+				"xdt_telemetry_detach: warning: failed to unlink %s: %s\n",
 				xsks_path, strerror(errno));
 		}
 	}
@@ -391,10 +391,10 @@ int xdp_labeling_device_detach(const struct xdp_labeling_device *device)
 	return 0;
 }
 
-int xdp_labeling_rule_session_open(const struct xdp_labeling_device *device,
-				   struct xdp_labeling_rule_session **sessionp)
+int xdt_telemetry_rule_session_open(const struct xdt_telemetry_device *device,
+				   struct xdt_telemetry_rule_session **sessionp)
 {
-	struct xdp_labeling_rule_session *session;
+	struct xdt_telemetry_rule_session *session;
 
 	if (!device || !sessionp)
 		return -EINVAL;
@@ -410,7 +410,7 @@ int xdp_labeling_rule_session_open(const struct xdp_labeling_device *device,
 	return 0;
 }
 
-void xdp_labeling_rule_session_close(struct xdp_labeling_rule_session *session)
+void xdt_telemetry_rule_session_close(struct xdt_telemetry_rule_session *session)
 {
 	if (!session)
 		return;
@@ -419,7 +419,7 @@ void xdp_labeling_rule_session_close(struct xdp_labeling_rule_session *session)
 	free(session);
 }
 
-static int map_update_rule(int map_fd, const struct xdp_labeling_rule *rule)
+static int map_update_rule(int map_fd, const struct xdt_telemetry_rule *rule)
 {
 	struct rule_value value = {
 	};
@@ -441,8 +441,8 @@ static int map_update_rule(int map_fd, const struct xdp_labeling_rule *rule)
 	return 0;
 }
 
-int xdp_labeling_rule_upsert(struct xdp_labeling_rule_session *session,
-			     const struct xdp_labeling_rule *rule)
+int xdt_telemetry_rule_upsert(struct xdt_telemetry_rule_session *session,
+			     const struct xdt_telemetry_rule *rule)
 {
 	int map_fd;
 	int err;
@@ -461,8 +461,8 @@ int xdp_labeling_rule_upsert(struct xdp_labeling_rule_session *session,
 	return 0;
 }
 
-int xdp_labeling_rule_bulk_upsert(struct xdp_labeling_rule_session *session,
-				  const struct xdp_labeling_rule *rules,
+int xdt_telemetry_rule_bulk_upsert(struct xdt_telemetry_rule_session *session,
+				  const struct xdt_telemetry_rule *rules,
 				  size_t rule_count)
 {
 	size_t i;
@@ -472,7 +472,7 @@ int xdp_labeling_rule_bulk_upsert(struct xdp_labeling_rule_session *session,
 		return -EINVAL;
 
 	for (i = 0; i < rule_count; i++) {
-		err = xdp_labeling_rule_upsert(session, &rules[i]);
+		err = xdt_telemetry_rule_upsert(session, &rules[i]);
 		if (err)
 			break;
 	}
@@ -480,7 +480,7 @@ int xdp_labeling_rule_bulk_upsert(struct xdp_labeling_rule_session *session,
 	return err;
 }
 
-int xdp_labeling_rule_remove(struct xdp_labeling_rule_session *session,
+int xdt_telemetry_rule_remove(struct xdt_telemetry_rule_session *session,
 			     const struct lpm_v4_key *key)
 {
 	int map_fd;
@@ -498,13 +498,13 @@ int xdp_labeling_rule_remove(struct xdp_labeling_rule_session *session,
 	return 0;
 }
 
-int xdp_labeling_rule_list(struct xdp_labeling_rule_session *session,
-			   struct xdp_labeling_rule_list *out)
+int xdt_telemetry_rule_list(struct xdt_telemetry_rule_session *session,
+			   struct xdt_telemetry_rule_list *out)
 {
 	struct lpm_v4_key key = {0};
 	struct lpm_v4_key next_key = {0};
 	struct rule_value value;
-	struct xdp_labeling_rule *rules = NULL;
+	struct xdt_telemetry_rule *rules = NULL;
 	size_t count = 0;
 	size_t capacity = 0;
 	bool have_key = false;
@@ -567,7 +567,7 @@ err_out:
 	return err;
 }
 
-void xdp_labeling_rule_list_free(struct xdp_labeling_rule_list *list)
+void xdt_telemetry_rule_list_free(struct xdt_telemetry_rule_list *list)
 {
 	if (!list)
 		return;
@@ -576,7 +576,7 @@ void xdp_labeling_rule_list_free(struct xdp_labeling_rule_list *list)
 	list->count = 0;
 }
 
-static int ensure_xsks_map(struct xdp_labeling_event_session *session)
+static int ensure_xsks_map(struct xdt_telemetry_event_session *session)
 {
 	char path[PATH_MAX];
 	int fd;
@@ -602,7 +602,7 @@ static int ensure_xsks_map(struct xdp_labeling_event_session *session)
 	return session->xsks_map_fd;
 }
 
-static int meta_matches_filter(const struct xdp_labeling_event_session *session,
+static int meta_matches_filter(const struct xdt_telemetry_event_session *session,
 			       const struct xdp_label_meta *meta)
 {
 	size_t i;
@@ -618,7 +618,7 @@ static int meta_matches_filter(const struct xdp_labeling_event_session *session,
 	return 0;
 }
 
-static int event_session_prepare_umem(struct xdp_labeling_event_session *session)
+static int event_session_prepare_umem(struct xdt_telemetry_event_session *session)
 {
 	struct xsk_umem_config cfg = {
 		.fill_size = XSK_RING_DEPTH,
@@ -655,7 +655,7 @@ static int event_session_prepare_umem(struct xdp_labeling_event_session *session
 	return 0;
 }
 
-static int event_session_prime_fill_queue(struct xdp_labeling_event_session *session)
+static int event_session_prime_fill_queue(struct xdt_telemetry_event_session *session)
 {
 	__u64 addr = 0;
 
@@ -690,7 +690,7 @@ static __u64 realtime_now_ns(void)
 	return (__u64)ts.tv_sec * 1000000000ULL + (__u64)ts.tv_nsec;
 }
 
-static void event_session_reclaim_tx(struct xdp_labeling_event_session *session)
+static void event_session_reclaim_tx(struct xdt_telemetry_event_session *session)
 {
 	__u64 addrs[XSK_BATCH_SIZE];
 	unsigned int idx_cq;
@@ -730,7 +730,7 @@ static void event_session_reclaim_tx(struct xdp_labeling_event_session *session)
 	}
 }
 
-static int event_session_process_rx(struct xdp_labeling_event_session *session)
+static int event_session_process_rx(struct xdt_telemetry_event_session *session)
 {
 	__u64 addrs[XSK_BATCH_SIZE];
 	__u32 lengths[XSK_BATCH_SIZE];
@@ -756,7 +756,7 @@ static int event_session_process_rx(struct xdp_labeling_event_session *session)
 							 base_addr);
 		unsigned char *data = base ? base + offset : NULL;
 		const struct xdp_label_meta *meta;
-		struct xdp_label_packet packet = {0};
+		struct xdt_telemetry_packet packet = {0};
 
 		forward_flags[i] = false;
 		addrs[i] = desc->addr;
@@ -831,10 +831,10 @@ static int event_session_process_rx(struct xdp_labeling_event_session *session)
 	return (int)handled;
 }
 
-int xdp_labeling_event_session_open(const struct xdp_labeling_device *device,
-				    struct xdp_labeling_event_session **sessionp)
+int xdt_telemetry_event_session_open(const struct xdt_telemetry_device *device,
+				    struct xdt_telemetry_event_session **sessionp)
 {
-	struct xdp_labeling_event_session *session;
+	struct xdt_telemetry_event_session *session;
 
 	if (!device || !sessionp)
 		return -EINVAL;
@@ -852,19 +852,19 @@ int xdp_labeling_event_session_open(const struct xdp_labeling_device *device,
 	return 0;
 }
 
-void xdp_labeling_event_session_close(struct xdp_labeling_event_session *session)
+void xdt_telemetry_event_session_close(struct xdt_telemetry_event_session *session)
 {
 	if (!session)
 		return;
 
-	xdp_labeling_events_unsubscribe(session);
+	xdt_telemetry_events_unsubscribe(session);
 	close_xsks_map_fd(session);
 	free(session);
 }
 
-int xdp_labeling_events_subscribe(struct xdp_labeling_event_session *session,
-				  const struct xdp_labeling_event_filter *filter,
-				  xdp_labeling_event_cb callback,
+int xdt_telemetry_events_subscribe(struct xdt_telemetry_event_session *session,
+				  const struct xdt_telemetry_event_filter *filter,
+				  xdt_telemetry_event_cb callback,
 				  void *user_data)
 {
 	struct xsk_socket_config xsk_cfg = {
@@ -937,7 +937,7 @@ err_cleanup_map:
 	return err;
 }
 
-int xdp_labeling_events_poll(struct xdp_labeling_event_session *session,
+int xdt_telemetry_events_poll(struct xdt_telemetry_event_session *session,
 			     int timeout_ms)
 {
 	int processed;
@@ -972,7 +972,7 @@ int xdp_labeling_events_poll(struct xdp_labeling_event_session *session,
 	return 0;
 }
 
-int xdp_labeling_events_unsubscribe(struct xdp_labeling_event_session *session)
+int xdt_telemetry_events_unsubscribe(struct xdt_telemetry_event_session *session)
 {
 	if (!session)
 		return -EINVAL;
@@ -989,7 +989,7 @@ int xdp_labeling_events_unsubscribe(struct xdp_labeling_event_session *session)
 	return 0;
 }
 
-int xdp_labeling_stats_get(struct xdp_labeling_rule_session *session,
+int xdt_telemetry_stats_get(struct xdt_telemetry_rule_session *session,
 			   __u32 label_id, __u64 *hit_count)
 {
 	(void)session;

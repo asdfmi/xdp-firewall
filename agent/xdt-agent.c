@@ -16,7 +16,7 @@
 
 #include "options.h"
 #include "telemetry_client.h"
-#include "xdp_labeling.h"
+#include "xdt_telemetry.h"
 
 #define AGENT_POLL_TIMEOUT_MS 1000
 
@@ -58,7 +58,7 @@ static void print_packet_stub(const struct telemetry_packet *packet,
 	fflush(stdout);
 }
 
-static void prepare_telemetry_packet(const struct xdp_label_packet *pkt,
+static void prepare_telemetry_packet(const struct xdt_telemetry_packet *pkt,
 				     struct telemetry_packet *out)
 {
 	const unsigned char *data = pkt->data;
@@ -123,7 +123,7 @@ static void prepare_telemetry_packet(const struct xdp_label_packet *pkt,
 	}
 }
 
-static void event_dispatch_cb(struct xdp_label_packet *pkt, void *user_data)
+static void event_dispatch_cb(struct xdt_telemetry_packet *pkt, void *user_data)
 {
 	struct send_context *ctx = user_data;
 	struct telemetry_packet packet;
@@ -158,17 +158,17 @@ static void event_dispatch_cb(struct xdp_label_packet *pkt, void *user_data)
 
 static int run_agent(const struct agent_options *opts)
 {
-	struct xdp_labeling_device *device = NULL;
-	struct xdp_labeling_event_session *events = NULL;
+	struct xdt_telemetry_device *device = NULL;
+	struct xdt_telemetry_event_session *events = NULL;
 	struct send_context send_ctx = {
 		.opts = opts,
 		.client = NULL,
 		.verbose = opts->verbose,
 		.warned_client = false,
 	};
-	struct xdp_labeling_attach_opts attach_opts = {
+	struct xdt_telemetry_attach_opts attach_opts = {
 		.ifname = opts->ifname,
-		.mode = XDP_LABELING_ATTACH_MODE_SKB,
+		.mode = XDT_TELEMETRY_ATTACH_MODE_SKB,
 		.pin_maps = true,
 		.pin_maps_set = true,
 		.pin_path = opts->pin_root,
@@ -182,21 +182,21 @@ static int run_agent(const struct agent_options *opts)
             opts->central_host, opts->central_port);
     }
 
-	err = xdp_labeling_device_open(&device, &attach_opts);
+	err = xdt_telemetry_device_open(&device, &attach_opts);
 	if (err) {
 		fprintf(stderr, "agent: failed to prepare device context: %s\n",
 			strerror(-err));
 		return EXIT_FAILURE;
 	}
 
-	err = xdp_labeling_event_session_open(device, &events);
+	err = xdt_telemetry_event_session_open(device, &events);
 	if (err) {
 		fprintf(stderr, "agent: failed to open event session: %s\n",
 			strerror(-err));
 		goto out;
 	}
 
-	err = xdp_labeling_events_subscribe(events, NULL,
+	err = xdt_telemetry_events_subscribe(events, NULL,
 					    event_dispatch_cb, &send_ctx);
 	if (err) {
 		fprintf(stderr, "agent: failed to subscribe to events: %s\n",
@@ -205,7 +205,7 @@ static int run_agent(const struct agent_options *opts)
 	}
 
 	while (!stop_agent) {
-		err = xdp_labeling_events_poll(events, AGENT_POLL_TIMEOUT_MS);
+		err = xdt_telemetry_events_poll(events, AGENT_POLL_TIMEOUT_MS);
 		if (err == -EINTR)
 			break;
 		if (err < 0) {
@@ -215,12 +215,12 @@ static int run_agent(const struct agent_options *opts)
 		}
 	}
 
-	xdp_labeling_events_unsubscribe(events);
+	xdt_telemetry_events_unsubscribe(events);
 
 out:
 	if (events)
-		xdp_labeling_event_session_close(events);
-	xdp_labeling_device_close(device);
+		xdt_telemetry_event_session_close(events);
+	xdt_telemetry_device_close(device);
 	telemetry_client_destroy(send_ctx.client);
 	return err ? EXIT_FAILURE : EXIT_SUCCESS;
 }

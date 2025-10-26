@@ -168,7 +168,7 @@ void usage(const char *prog_name, const char *doc,
     const struct prog_option *opt;
 
 	if (!prog_name)
-		prog_name = "xdpble";
+		prog_name = "xdt";
 
 	printf("\nUsage: %s", prog_name);
 	if (options) {
@@ -391,7 +391,7 @@ int dispatch_commands(const char *argv0, int argc, char **argv,
 	}
 
 	snprintf(usage_buf, sizeof(usage_buf), "%s %s",
-		 prog_name ? prog_name : "xdpble", cmd->name);
+		 prog_name ? prog_name : "xdt", cmd->name);
 
 	err = parse_cmdline_args(argc, argv, cmd->options, cfg, cfg_size,
 		      cmd->cfg_size, prog_name, usage_buf, cmd->doc,

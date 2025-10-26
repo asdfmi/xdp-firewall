@@ -1,22 +1,22 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: xdp-service
+  name: xdt-service
   labels:
-    app: xdp-service
+    app: xdt-service
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: xdp-service
+      app: xdt-service
   template:
     metadata:
       labels:
-        app: xdp-service
+        app: xdt-service
     spec:
       containers:
         - name: service-health
-          image: your-registry/xdp-service:latest
+          image: your-registry/xdt-service:latest
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/service-health"]
           args:
@@ -29,12 +29,12 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: xdp-service
+  name: xdt-service
   labels:
-    app: xdp-service
+    app: xdt-service
 spec:
   selector:
-    app: xdp-service
+    app: xdt-service
   ports:
     - name: http
       port: 8081

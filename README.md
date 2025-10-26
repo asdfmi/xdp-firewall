@@ -1,14 +1,14 @@
-# XDP Telemetry Firewall (PoC)
+# XDP Telemetry (PoC)
 
 This repository contains a monorepo PoC that applies XDP/eBPF to label packets, forwards traffic back to the service path, and streams metadata to a central telemetry server with a lightweight UI. The project is organised as modular components so it can later be split into separate services if needed.
 
 ## Components
 
-- **xdp/** — eBPF program (`xdp/bpf/xdp_labeler.bpf.c`) and user-space helpers (`xdp/lib/xdp_labeling.c`, headers under `xdp/include/`).
-- **agent/** — `xdp-agent` binary. Attaches to the pinned maps, receives events via AF_XDP, reinjects packets, and streams telemetry records to the central server. Command-line options are parsed in `agent/options.c`.
+- **xdp/** — eBPF program (`xdp/bpf/xdp_labeler.bpf.c`) and user-space helpers (`xdp/lib/xdt_telemetry.c`, headers under `xdp/include/`).
+- **agent/** — `xdt-agent` binary. Attaches to the pinned maps, receives events via AF_XDP, reinjects packets, and streams telemetry records to the central server. Command-line options are parsed in `agent/options.c`.
 - **central/** — Telemetry server. Receives binary telemetry streams, keeps in-memory statistics per agent, exposes `/metrics.json`, and serves the dashboard UI under `central/ui/static/`.
 - **service/** — Minimal HTTP health server that listens on `/healthz`; acts as a placeholder for the protected business application.
-- **cli/** — `xdp-labeling` CLI tool for attach/detach, rule management, and debugging (uses the shared library under `xdp/`).
+- **cli/** — `xdt` CLI tool for attach/detach, rule management, and debugging (uses the shared library under `xdp/`).
 - **common/** — Shared telemetry encoder/decoder (`common/telemetry`), used by both agent and central.
 - **k8s/** — Sample Kubernetes manifests (DaemonSet for the agent, Deployments/Services for central and the sample service).
 
@@ -22,8 +22,8 @@ make
 
 Artifacts are placed in `build/`:
 
-- `build/xdp-labeling` — CLI
-- `build/xdp-agent` — agent daemon
+- `build/xdt` — CLI
+- `build/xdt-agent` — agent daemon
 - `build/central` — telemetry + UI server
 - `build/service-health` — sample service
 - `build/xdp_labeler.bpf.o` — compiled eBPF program
@@ -32,16 +32,16 @@ Artifacts are placed in `build/`:
 
 1. Attach the XDP program and pin maps using the CLI:
    ```bash
-   sudo build/xdp-labeling attach --interface <ifname>
+   sudo build/xdt attach --interface <ifname>
    ```
-2. Insert IPv4 rules as needed (e.g. `build/xdp-labeling add ...`).
+2. Insert IPv4 rules as needed (e.g. `build/xdt add ...`).
 3. Start the telemetry server:
    ```bash
    ./build/central 50051 8080   # telemetry port, HTTP UI port
    ```
 4. Start the agent (requires root, interface, central endpoint, optional agent id):
    ```bash
-   sudo ./build/xdp-agent \
+   sudo ./build/xdt-agent \
      --interface <ifname> \
      --central 127.0.0.1:50051 \
      --agent-id $(hostname)
@@ -55,20 +55,20 @@ Artifacts are placed in `build/`:
 
 Detach when finished:
 ```bash
-sudo build/xdp-labeling detach --interface <ifname>
+sudo build/xdt detach --interface <ifname>
 ```
 
 ## Kubernetes Sample
 
 Sample manifests are provided in the `k8s/` directory:
 
-- `daemonset-xdp-agent.yaml` — deploys `xdp-agent` as a privileged DaemonSet. The init container runs `xdp-labeling attach`, and a `preStop` hook detaches the program.
+- `daemonset-xdt-agent.yaml` — deploys `xdt-agent` as a privileged DaemonSet. The init container runs `xdt attach`, and a `preStop` hook detaches the program.
 - `central-deployment.yaml` — deploys the telemetry server and exposes telemetry (`50051`) and UI (`8080`).
 - `service-deployment.yaml` — deploys the sample health-check service on port `8081`.
 
 Before applying, adapt the following to your cluster:
 
-1. Build and push container images for `xdp-agent`, `xdp-cli` (for attach/detach), `central`, and `service-health` to your registry (`image:` fields are placeholders).
+1. Build and push container images for `xdt-agent`, `xdt` (CLI for attach/detach), `central`, and `service-health` to your registry (`image:` fields are placeholders).
 2. Set the interface name used on worker nodes (`INTERFACE_NAME` env var / args). For heterogeneous environments you may need node labels and per-node configuration.
 3. Ensure nodes run with kernel/driver support for the XDP mode you intend to use. The DaemonSet requires `privileged` pods, host networking, and access to `/sys/fs/bpf` (mounted via `hostPath`).
 4. Apply manifests:
@@ -76,7 +76,7 @@ Before applying, adapt the following to your cluster:
    kubectl apply -f k8s/
    ```
 5. Verify:
-   - `kubectl get pods -l app=xdp-agent` (one per node)
+   - `kubectl get pods -l app=xdt-agent` (one per node)
    - `kubectl get svc central` (telemetry/UI service)
    - `kubectl port-forward svc/central 8080:8080` and open `http://localhost:8080/` to inspect the dashboard.
 

@@ -1,29 +1,29 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: xdp-agent
+  name: xdt-agent
   labels:
-    app: xdp-agent
+    app: xdt-agent
 spec:
   selector:
     matchLabels:
-      app: xdp-agent
+      app: xdt-agent
   template:
     metadata:
       labels:
-        app: xdp-agent
+        app: xdt-agent
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       securityContext:
         runAsUser: 0
       containers:
-        - name: xdp-agent
-          image: your-registry/xdp-agent:latest
+        - name: xdt-agent
+          image: your-registry/xdt-agent:latest
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
-          command: ["/usr/local/bin/xdp-agent"]
+          command: ["/usr/local/bin/xdt-agent"]
           args:
             - "--interface"
             - "$(INTERFACE_NAME)"
@@ -45,12 +45,12 @@ spec:
               mountPath: /usr/sbin/bpftool
               readOnly: true
       initContainers:
-        - name: xdp-attach
-          image: your-registry/xdp-cli:latest
+        - name: xdt-attach
+          image: your-registry/xdt:latest
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
-          command: ["/usr/local/bin/xdp-labeling"]
+          command: ["/usr/local/bin/xdt"]
           args:
             - "attach"
             - "--interface"
@@ -84,7 +84,7 @@ spec:
         preStop:
           exec:
             command:
-              - /usr/local/bin/xdp-labeling
+              - /usr/local/bin/xdt
               - detach
               - --interface
               - "$(INTERFACE_NAME)"

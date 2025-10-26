@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <linux/bpf.h>
 #include <linux/types.h>
-#include "xdp_labeling.h"
+#include "xdt_telemetry.h"
 #include "params.h"
 
 struct helpopt {
@@ -16,7 +16,7 @@ int do_help(const void *cfg, const char *pin_root_path);
 
 struct attachopt {
 	struct iface iface;
-	enum xdp_labeling_attach_mode mode;
+	enum xdt_telemetry_attach_mode mode;
 	const char *object_path;
 };
 

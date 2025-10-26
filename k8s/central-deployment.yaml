@@ -1,22 +1,22 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: xdp-central
+  name: xdt-central
   labels:
-    app: xdp-central
+    app: xdt-central
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: xdp-central
+      app: xdt-central
   template:
     metadata:
       labels:
-        app: xdp-central
+        app: xdt-central
     spec:
       containers:
         - name: central
-          image: your-registry/xdp-central:latest
+          image: your-registry/xdt-central:latest
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/central"]
           args:
@@ -34,10 +34,10 @@ kind: Service
 metadata:
   name: central
   labels:
-    app: xdp-central
+    app: xdt-central
 spec:
   selector:
-    app: xdp-central
+    app: xdt-central
   ports:
     - name: telemetry
       port: 50051

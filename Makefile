@@ -43,13 +43,13 @@ CLI_SOURCES := \
 	cli/cmd/help.c \
 	cli/cmd/list.c \
 	cli/cmd/log.c \
-	cli/xdp-labeling.c
+	cli/xdt.c
 
 LIB_SOURCES := \
-	xdp/lib/xdp_labeling.c
+	xdp/lib/xdt_telemetry.c
 
 AGENT_C_SOURCES := \
-	agent/xdp-agent.c \
+	agent/xdt-agent.c \
 	agent/options.c \
 	agent/telemetry_client.c
 
@@ -82,15 +82,15 @@ SERVICE_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(SERVICE_SOURCES))
 
 TEST_BINS := $(patsubst tests/integration/%.c,build/tests/integration/%,$(TEST_SOURCES))
 
-XDPBLE_BIN := build/xdp-labeling
-AGENT_BIN := build/xdp-agent
+XDT_BIN := build/xdt
+AGENT_BIN := build/xdt-agent
 CENTRAL_BIN := build/central
 SERVICE_BIN := build/service-health
 
 SYS_INCLUDES := /usr/include /usr/include/$(shell uname -m)-linux-gnu
 
 .PHONY: all
-all: $(XDPBLE_BIN) $(AGENT_BIN) $(CENTRAL_BIN) $(SERVICE_BIN)
+all: $(XDT_BIN) $(AGENT_BIN) $(CENTRAL_BIN) $(SERVICE_BIN)
 
 build:
 	@mkdir -p build
@@ -122,7 +122,7 @@ $(OBJDIR)/%.o: %.cc | $(OBJDIR)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS) $(LIBBPF_CFLAGS) $(LIBXDP_CFLAGS) -c $< -o $@
 
-$(XDPBLE_BIN): $(CLI_OBJS) $(LIB_OBJS) $(BPFTARGET) | build
+$(XDT_BIN): $(CLI_OBJS) $(LIB_OBJS) $(BPFTARGET) | build
 	$(CC) $(CFLAGS) $(CLI_OBJS) $(LIB_OBJS) -o $@ \
 		$(LIBBPF_LDLIBS) $(LIBXDP_LDLIBS)
 
@@ -142,7 +142,7 @@ build/tests/integration/%: tests/integration/%.c $(LIB_OBJS) $(BPFTARGET) | buil
 		$(LIBBPF_LDLIBS) $(LIBXDP_LDLIBS)
 
 .PHONY: test
-test: $(XDPBLE_BIN) $(TEST_BINS)
+test: $(XDT_BIN) $(TEST_BINS)
 	@failed=0; \
 	for t in $(TEST_BINS); do \
 		"$$t"; \

@@ -6,7 +6,7 @@
 #include <linux/limits.h>
 
 #include "cli_shared.h"
-#include "xdp-labeling.h"
+#include "xdt.h"
 
 const struct detachopt defaults_detach = {};
 
@@ -22,12 +22,12 @@ struct prog_option detach_options[] = {
 int do_detach(const void *cfg, __unused const char *pin_root_path)
 {
 	const struct detachopt *opt = cfg;
-	struct xdp_labeling_attach_opts lib_opts = {
+	struct xdt_telemetry_attach_opts lib_opts = {
 		.pin_maps = true,
 		.pin_maps_set = true,
 		.pin_path = PIN_DIR,
 	};
-	struct xdp_labeling_device *device = NULL;
+	struct xdt_telemetry_device *device = NULL;
 	int err;
 
 	if (!opt || !opt->iface.ifname || !opt->iface.ifindex) {
@@ -36,31 +36,31 @@ int do_detach(const void *cfg, __unused const char *pin_root_path)
 	}
 
 	lib_opts.ifname = opt->iface.ifname;
-	lib_opts.mode = XDP_LABELING_ATTACH_MODE_SKB;
+	lib_opts.mode = XDT_TELEMETRY_ATTACH_MODE_SKB;
 
-	err = xdp_labeling_device_open(&device, &lib_opts);
+	err = xdt_telemetry_device_open(&device, &lib_opts);
 	if (err) {
 		fprintf(stderr, "detach: failed to prepare context for %s: %s\n",
 			opt->iface.ifname, strerror(-err));
 		return EXIT_FAILURE;
 	}
 
-	err = xdp_labeling_device_detach(device);
+	err = xdt_telemetry_device_detach(device);
 	if (err) {
 		if (err == -ENOENT) {
-			fprintf(stderr,
-				"detach: no XDP program found on %s\n",
-				opt->iface.ifname);
+		fprintf(stderr,
+			"detach: no XDP Telemetry program found on %s\n",
+			opt->iface.ifname);
 		} else {
 			fprintf(stderr,
 				"detach: failed to detach program on %s: %s\n",
 				opt->iface.ifname, strerror(-err));
 		}
-		xdp_labeling_device_close(device);
+		xdt_telemetry_device_close(device);
 		return EXIT_FAILURE;
 	}
 
-	xdp_labeling_device_close(device);
-	printf("Detached XDP program from %s.\n", opt->iface.ifname);
+	xdt_telemetry_device_close(device);
+printf("Detached XDP Telemetry program from %s.\n", opt->iface.ifname);
 	return EXIT_SUCCESS;
 }

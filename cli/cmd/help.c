@@ -3,7 +3,7 @@
 #include <string.h>
 
 #include "cli_shared.h"
-#include "xdp-labeling.h"
+#include "xdt.h"
 #include "params.h"
 
 /* forward declaration provided by main compilation unit */
