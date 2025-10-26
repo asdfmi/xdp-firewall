@@ -9,16 +9,157 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <linux/limits.h>
 #include <linux/if_ether.h>
+#include <net/if.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
+#include <stdbool.h>
 
-#include "options.h"
+#include "params.h"
 #include "telemetry_client.h"
 #include "xdt_telemetry.h"
 
 #define AGENT_POLL_TIMEOUT_MS 1000
+#define AGENT_DEFAULT_CENTRAL "127.0.0.1:50051"
+
+struct agent_options {
+	char ifname[IF_NAMESIZE];
+	char pin_root[PATH_MAX];
+	char central_host[256];
+	unsigned short central_port;
+	char agent_id[64];
+	bool verbose;
+};
+
+struct agent_cli_config {
+	struct iface iface;
+	const char *central;
+	const char *pin_root;
+	const char *agent_id;
+	bool verbose;
+};
+
+static struct prog_option agent_prog_options[] = {
+	DEFINE_OPTION("interface", OPT_IFNAME, struct agent_cli_config, iface,
+		.short_opt = 'i',
+		.metavar = "<ifname>",
+		.required = true,
+		.help = "Interface to attach to"),
+	DEFINE_OPTION("central", OPT_STRING, struct agent_cli_config, central,
+		.short_opt = 'c',
+		.metavar = "<host:port>",
+		.help = "Central endpoint (default " AGENT_DEFAULT_CENTRAL ")"),
+	DEFINE_OPTION("pin-root", OPT_STRING, struct agent_cli_config, pin_root,
+		.short_opt = 'p',
+		.metavar = "<path>",
+		.help = "bpffs pin root (default " XDT_TELEMETRY_PIN_ROOT_DEFAULT ")"),
+	DEFINE_OPTION("agent-id", OPT_STRING, struct agent_cli_config, agent_id,
+		.short_opt = 'a',
+		.metavar = "<id>",
+		.help = "Identifier reported to central"),
+	DEFINE_OPTION("verbose", OPT_BOOL, struct agent_cli_config, verbose,
+		.short_opt = 'v',
+		.help = "Enable verbose logging"),
+	END_OPTIONS
+};
+
+static int parse_central_endpoint(const char *arg, struct agent_options *opts)
+{
+	char buf[512];
+	char *colon;
+	long port;
+	char *endptr;
+
+	if (!arg || !opts)
+		return -EINVAL;
+
+	if (strlen(arg) >= sizeof(buf))
+		return -ENAMETOOLONG;
+
+	strcpy(buf, arg);
+	colon = strrchr(buf, ':');
+	if (!colon)
+		return -EINVAL;
+
+	*colon = '\0';
+	port = strtol(colon + 1, &endptr, 10);
+	if (*endptr != '\0' || port <= 0 || port > 65535)
+		return -EINVAL;
+
+	strncpy(opts->central_host, buf, sizeof(opts->central_host) - 1);
+	opts->central_host[sizeof(opts->central_host) - 1] = '\0';
+	opts->central_port = (unsigned short)port;
+
+	return 0;
+}
+
+static int agent_options_parse(int argc, char **argv, struct agent_options *opts)
+{
+	static char hostname_buf[sizeof(((struct agent_options *)0)->agent_id)];
+	struct agent_cli_config cfg;
+	struct agent_cli_config defaults = {
+		.central = AGENT_DEFAULT_CENTRAL,
+		.pin_root = XDT_TELEMETRY_PIN_ROOT_DEFAULT,
+		.agent_id = NULL,
+		.verbose = false,
+	};
+	const char *prog = (argc > 0 && argv && argv[0]) ? argv[0] : "xdt-agent";
+	int ret;
+
+	if (!opts)
+		return -EINVAL;
+
+	memset(opts, 0, sizeof(*opts));
+	memset(&cfg, 0, sizeof(cfg));
+
+	if (gethostname(hostname_buf, sizeof(hostname_buf) - 1) == 0) {
+		hostname_buf[sizeof(hostname_buf) - 1] = '\0';
+		defaults.agent_id = hostname_buf;
+	}
+
+	ret = parse_cmdline_args(argc, argv, agent_prog_options, &cfg,
+				 sizeof(cfg), sizeof(cfg), "xdt-agent", prog,
+				 "XDP telemetry agent options", &defaults);
+	if (ret)
+		return ret;
+
+	if (!cfg.central)
+		cfg.central = AGENT_DEFAULT_CENTRAL;
+
+	ret = parse_central_endpoint(cfg.central, opts);
+	if (ret) {
+		fprintf(stderr, "agent: invalid --central value '%s'\n",
+			cfg.central);
+		return ret;
+	}
+
+	if (!cfg.pin_root)
+		cfg.pin_root = XDT_TELEMETRY_PIN_ROOT_DEFAULT;
+	strncpy(opts->pin_root, cfg.pin_root, sizeof(opts->pin_root) - 1);
+	opts->pin_root[sizeof(opts->pin_root) - 1] = '\0';
+
+	if (cfg.agent_id && cfg.agent_id[0]) {
+		strncpy(opts->agent_id, cfg.agent_id,
+			sizeof(opts->agent_id) - 1);
+		opts->agent_id[sizeof(opts->agent_id) - 1] = '\0';
+	} else {
+		opts->agent_id[0] = '\0';
+	}
+
+	opts->verbose = cfg.verbose;
+
+	if (!cfg.iface.ifname) {
+		fprintf(stderr, "agent: --interface is required\n");
+		return -EINVAL;
+	}
+
+	strncpy(opts->ifname, cfg.iface.ifname, sizeof(opts->ifname) - 1);
+	opts->ifname[sizeof(opts->ifname) - 1] = '\0';
+
+	return 0;
+}
 
 static volatile sig_atomic_t stop_agent;
 

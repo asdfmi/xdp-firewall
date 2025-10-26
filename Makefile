@@ -8,7 +8,7 @@ CFLAGS ?= -g -O2 -Wall -Wextra -std=c11
 CXXFLAGS ?= -g -O2 -Wall -Wextra -std=c++17
 CPPFLAGS ?=
 
-CPPFLAGS += -I. -Ixdp/include -Ibuild -Icli -Iagent -Icommon
+CPPFLAGS += -I. -Ixdp/include -Ibuild -Ixdt -Iagent -Icommon -Icommon/cli
 
 LIBBPF_CFLAGS ?= $(shell pkg-config --cflags libbpf 2>/dev/null)
 LIBBPF_LDLIBS ?= $(shell pkg-config --libs libbpf 2>/dev/null)
@@ -32,25 +32,26 @@ endif
 
 THREAD_LDLIBS ?= -pthread
 
-BPFTARGET := build/xdp_labeler.bpf.o
-BPF_SRC := xdp/bpf/xdp_labeler.bpf.c
+BPFTARGET := build/xdp.bpf.o
+BPF_SRC := xdp/bpf/xdp.bpf.c
+
+COMMON_CLI_SOURCES := \
+	common/cli/params.c
 
 CLI_SOURCES := \
-	cli/params.c \
-	cli/cmd/add.c \
-	cli/cmd/attach.c \
-	cli/cmd/detach.c \
-	cli/cmd/help.c \
-	cli/cmd/list.c \
-	cli/cmd/log.c \
-	cli/xdt.c
+	xdt/cmd/add.c \
+	xdt/cmd/attach.c \
+	xdt/cmd/detach.c \
+	xdt/cmd/help.c \
+	xdt/cmd/list.c \
+	xdt/cmd/log.c \
+	xdt/xdt.c
 
 LIB_SOURCES := \
 	xdp/lib/xdt_telemetry.c
 
 AGENT_C_SOURCES := \
 	agent/xdt-agent.c \
-	agent/options.c \
 	agent/telemetry_client.c
 
 TELEMETRY_C_SOURCES := \
@@ -64,23 +65,27 @@ CENTRAL_SOURCES := \
 SERVICE_SOURCES := \
 	service/health-server.c
 
-TEST_SOURCES := $(wildcard tests/integration/*.c)
+TEST_SOURCES := $(wildcard xdp/tests/integration/*.c)
 
 OBJDIR := build/obj
 
-CLI_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(CLI_SOURCES))
+COMMON_CLI_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(COMMON_CLI_SOURCES))
+
+CLI_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(CLI_SOURCES)) \
+	$(COMMON_CLI_OBJS)
 LIB_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(LIB_SOURCES))
 TELEMETRY_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(TELEMETRY_C_SOURCES))
 
 AGENT_OBJS := \
 	$(patsubst %.c,$(OBJDIR)/%.o,$(AGENT_C_SOURCES)) \
+	$(COMMON_CLI_OBJS) \
 	$(TELEMETRY_OBJS)
 CENTRAL_OBJS := \
 	$(patsubst %.c,$(OBJDIR)/%.o,$(CENTRAL_SOURCES)) \
 	$(TELEMETRY_OBJS)
 SERVICE_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(SERVICE_SOURCES))
 
-TEST_BINS := $(patsubst tests/integration/%.c,build/tests/integration/%,$(TEST_SOURCES))
+TEST_BINS := $(patsubst xdp/tests/integration/%.c,build/tests/integration/%,$(TEST_SOURCES))
 
 XDT_BIN := build/xdt
 AGENT_BIN := build/xdt-agent
@@ -137,7 +142,7 @@ $(CENTRAL_BIN): $(CENTRAL_OBJS) | build
 $(SERVICE_BIN): $(SERVICE_OBJS) | build
 	$(CC) $(CFLAGS) $(SERVICE_OBJS) -o $@ $(THREAD_LDLIBS)
 
-build/tests/integration/%: tests/integration/%.c $(LIB_OBJS) $(BPFTARGET) | build/tests/integration
+build/tests/integration/%: xdp/tests/integration/%.c $(LIB_OBJS) $(BPFTARGET) | build/tests/integration
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(LIBBPF_CFLAGS) $(LIBXDP_CFLAGS) $< $(LIB_OBJS) -o $@ \
 		$(LIBBPF_LDLIBS) $(LIBXDP_LDLIBS)
 

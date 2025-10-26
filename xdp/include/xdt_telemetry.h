@@ -8,7 +8,7 @@
 #include <linux/types.h>
 #endif
 
-#define XDT_TELEMETRY_DEFAULT_OBJECT "build/xdp_labeler.bpf.o"
+#define XDT_TELEMETRY_DEFAULT_OBJECT "build/xdp.bpf.o"
 #define XDT_TELEMETRY_PIN_ROOT_DEFAULT "/sys/fs/bpf/xdt-telemetry"
 
 #include "label_meta.h"

@@ -4,12 +4,12 @@ This repository contains a monorepo PoC that applies XDP/eBPF to label packets, 
 
 ## Components
 
-- **xdp/** — eBPF program (`xdp/bpf/xdp_labeler.bpf.c`) and user-space helpers (`xdp/lib/xdt_telemetry.c`, headers under `xdp/include/`).
-- **agent/** — `xdt-agent` binary. Attaches to the pinned maps, receives events via `AF_XDP`, reinjects packets, and streams telemetry records to the central server. Command-line options are parsed in `agent/options.c`.
-- **central/** — Telemetry server. Receives binary telemetry streams, keeps in-memory statistics per agent, exposes `/metrics.json`, and serves the dashboard UI under `central/ui/static/`.
+- **xdp/** — eBPF program (`xdp/bpf/xdp.bpf.c`) and user-space helpers (`xdp/lib/xdt_telemetry.c`, headers under `xdp/include/`).
+- **agent/** — `xdt-agent` binary. Attaches to the pinned maps, receives events via `AF_XDP`, reinjects packets, and streams telemetry records over a length-prefixed TCP channel to the central server. Command-line options are parsed inline with the shared params helper.
+- **central/** — Telemetry server. Accepts the length-prefixed telemetry frames, keeps in-memory statistics per agent, exposes `/metrics.json`, and serves the dashboard UI under `central/ui/static/`.
 - **service/** — Minimal HTTP health server that listens on `/healthz`; acts as a placeholder for the protected business application.
-- **cli/** — `xdt` CLI tool for attach/detach, rule management, and debugging (uses the shared library under `xdp/`).
-- **common/** — Shared telemetry encoder/decoder (`common/telemetry`), used by both agent and central.
+- **xdt/** — `xdt` CLI tool for attach/detach, rule management, and debugging (uses the shared library under `xdp/`).
+- **common/** — Shared telemetry encoder/decoder (`common/telemetry`) and command-line parser (`common/cli`), used by agent and CLI.
 - **k8s/** — Sample Kubernetes manifests (DaemonSet for the agent, Deployments/Services for central and the sample service).
 
 ## Build
@@ -26,7 +26,7 @@ Artifacts are placed in `build/`:
 - `build/xdt-agent` — agent daemon
 - `build/central` — telemetry + UI server
 - `build/service-health` — sample service
-- `build/xdp_labeler.bpf.o` — compiled eBPF program
+- `build/xdp.bpf.o` — compiled eBPF program
 
 ## Local PoC Walkthrough
 
@@ -58,27 +58,31 @@ Detach when finished:
 sudo build/xdt detach --interface <ifname>
 ```
 
-## Kubernetes Sample
+## Kubernetes Sample (kind)
 
-Sample manifests are provided in the `k8s/` directory:
+Sample manifests live in `k8s/`. You can exercise them locally with a kind cluster:
 
-- `daemonset-xdt-agent.yaml` — deploys `xdt-agent` as a privileged DaemonSet. The init container runs `xdt attach`, and a `preStop` hook detaches the program.
-- `central-deployment.yaml` — deploys the telemetry server and exposes telemetry (`50051`) and UI (`8080`).
-- `service-deployment.yaml` — deploys the sample health-check service on port `8081`.
-
-Before applying, adapt the following to your cluster:
-
-1. Build and push container images for `xdt-agent`, `xdt` (CLI for attach/detach), `central`, and `service-health` to your registry (`image:` fields are placeholders).
-2. Set the interface name used on worker nodes (`INTERFACE_NAME` env var / args). For heterogeneous environments you may need node labels and per-node configuration.
-3. Ensure nodes run with kernel/driver support for the XDP mode you intend to use. The DaemonSet requires `privileged` pods, host networking, and access to `/sys/fs/bpf` (mounted via `hostPath`).
-4. Apply manifests:
+1. Install [kind](https://kind.sigs.k8s.io/) and create a cluster (requires Docker):
+   ```bash
+   kind create cluster --name xdt
+   kind load docker-image <your-registry>/xdt-agent:latest
+   kind load docker-image <your-registry>/xdt:latest
+   kind load docker-image <your-registry>/central:latest
+   kind load docker-image <your-registry>/service-health:latest
+   ```
+2. Update the manifests with your image names and the interface to attach on each node (kind nodes typically expose `eth0` inside the container).
+3. Apply the manifests:
    ```bash
    kubectl apply -f k8s/
    ```
-5. Verify:
-   - `kubectl get pods -l app=xdt-agent` (one per node)
-   - `kubectl get svc central` (telemetry/UI service)
-   - `kubectl port-forward svc/central 8080:8080` and open `http://localhost:8080/` to inspect the dashboard.
+4. Verify the rollout:
+   - `kubectl get pods -n default -l app=xdt-agent`
+   - `kubectl get svc central`
+   - `kubectl port-forward svc/central 8080:8080` and browse `http://localhost:8080/`.
+5. Tear down when finished:
+   ```bash
+   kind delete cluster --name xdt
+   ```
 
 ## Telemetry UI
 
