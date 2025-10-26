@@ -5,7 +5,7 @@ metadata:
   labels:
     app: xdt-central
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: xdt-central
@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: central
-          image: your-registry/xdt-central:latest
+          image: xdt-central:latest
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/central"]
           args:

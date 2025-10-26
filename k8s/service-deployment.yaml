@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: service-health
-          image: your-registry/xdt-service:latest
+          image: xdt-service:latest
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/service-health"]
           args:

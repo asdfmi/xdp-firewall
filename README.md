@@ -14,7 +14,7 @@ This repository contains a monorepo PoC that applies XDP/eBPF to label packets, 
 
 ## Build
 
-Dependencies: `clang`, `bpftool`, `libbpf`, `libxdp`, standard POSIX toolchain.
+Dependencies: `clang`, `bpftool`, `libbpf`, standard POSIX toolchain.
 
 ```bash
 make
@@ -34,21 +34,21 @@ Sample manifests live in `k8s/`. You can exercise them locally with a kind clust
 
 1. Install [kind](https://kind.sigs.k8s.io/) and create a cluster (requires Docker):
    ```bash
-   kind create cluster --name xdt
-   kind load docker-image <your-registry>/xdt-agent:latest
-   kind load docker-image <your-registry>/xdt:latest
-   kind load docker-image <your-registry>/central:latest
-   kind load docker-image <your-registry>/service-health:latest
+   kind create cluster --name xdt --config k8s/cluster/kind-config.yaml
+   export DOCKER_BUILDKIT=1
+   make docker-images DOCKER_IMAGE_PREFIX=xdt
+   kind load docker-image xdt-agent:latest xdt-central:latest xdt-service:latest xdt-xdt:latest --name xdt
    ```
-2. Update the manifests with your image names and the interface to attach on each node (kind nodes typically expose `eth0` inside the container).
+2. Update the interface if needed (`k8s/daemonset-xdt-agent.yaml` defaults to `eth0` inside kind nodes).
 3. Apply the manifests:
    ```bash
    kubectl apply -f k8s/
    ```
 4. Verify the rollout:
-   - `kubectl get pods -n default -l app=xdt-agent`
-   - `kubectl get svc central`
+   - `kubectl get pods -n default -o wide`
+   - `kubectl get svc central xdt-service`
    - `kubectl port-forward svc/central 8080:8080` and browse `http://localhost:8080/`.
+   - `kubectl run curl-test --rm -it --image=curlimages/curl -- curl -s http://xdt-service:8081/`
 5. Tear down when finished:
    ```bash
    kind delete cluster --name xdt

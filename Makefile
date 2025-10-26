@@ -32,6 +32,13 @@ endif
 
 THREAD_LDLIBS ?= -pthread
 
+DOCKER ?= docker
+DOCKER_BUILD_FLAGS ?=
+DOCKER_IMAGE_REGISTRY ?=
+DOCKER_IMAGE_PREFIX ?= xdt
+DOCKER_IMAGE_TAG ?= latest
+DOCKER_TARGETS := agent central service xdt
+
 BPFTARGET := build/xdp.bpf.o
 BPF_SRC := xdp/bpf/xdp.bpf.c
 
@@ -171,3 +178,12 @@ clean:
 cleanup:
 	@$(MAKE) clean
 	@$(MAKE) all
+
+.PHONY: docker-images
+docker-images: build/vmlinux.h
+	@set -e; \
+	for tgt in $(DOCKER_TARGETS); do \
+		image="$(if $(DOCKER_IMAGE_REGISTRY),$(DOCKER_IMAGE_REGISTRY)/,)$(DOCKER_IMAGE_PREFIX)-$$tgt:$(DOCKER_IMAGE_TAG)"; \
+		echo "==> Building $$image (target $$tgt)"; \
+		$(DOCKER) build $(DOCKER_BUILD_FLAGS) --target $$tgt -t $$image .; \
+	done
