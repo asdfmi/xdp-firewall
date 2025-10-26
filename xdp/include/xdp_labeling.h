@@ -56,9 +56,10 @@ struct xdp_label_packet {
 	__u64 timestamp_ns;
 	__u32 ifindex;
 	__u32 queue_id;
+	bool forward_to_kernel;
 };
 
-typedef void (*xdp_labeling_event_cb)(const struct xdp_label_packet *packet,
+typedef void (*xdp_labeling_event_cb)(struct xdp_label_packet *packet,
 				      void *user_data);
 
 int xdp_labeling_device_open(struct xdp_labeling_device **device,

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>XDP Telemetry Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>XDP Telemetry Dashboard</h1>
+    <p class="subtitle">Live counters grouped by agent</p>
+  </header>
+  <main>
+    <section class="metrics">
+      <h2>Overview</h2>
+      <div class="stat">
+        <span class="label">Total Events</span>
+        <span id="total-events" class="value">0</span>
+      </div>
+      <div class="stat">
+        <span class="label">Last Updated</span>
+        <span id="updated-at" class="value">-</span>
+      </div>
+    </section>
+
+    <section class="nodes" id="nodes"></section>
+  </main>
+
+  <footer>
+    <p>Powered by xdp-agent &amp; central</p>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

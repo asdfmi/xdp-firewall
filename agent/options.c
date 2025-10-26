@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "xdp_labeling.h"
 
@@ -17,6 +18,9 @@ static void set_defaults(struct agent_options *opts)
 	opts->central_port = 50051;
 	strncpy(opts->pin_root, XDP_LABELING_PIN_ROOT_DEFAULT,
 		sizeof(opts->pin_root) - 1);
+	if (gethostname(opts->agent_id, sizeof(opts->agent_id) - 1) != 0)
+		opts->agent_id[0] = '\0';
+	opts->agent_id[sizeof(opts->agent_id) - 1] = '\0';
 	opts->verbose = false;
 }
 
@@ -60,6 +64,7 @@ void agent_options_print_usage(const char *prog)
 		"Optional:\n"
 		"  -c, --central <host:port>  Central endpoint (default 127.0.0.1:50051)\n"
 		"  -p, --pin-root <path>      bpffs pin root (default %s)\n"
+		"  -a, --agent-id <id>       Identifier reported to central (default hostname)\n"
 		"  -v, --verbose              Enable verbose logging\n"
 		"  -h, --help                 Show this help\n",
 		prog, XDP_LABELING_PIN_ROOT_DEFAULT);
@@ -70,8 +75,9 @@ int agent_options_parse(int argc, char **argv, struct agent_options *opts)
 	static const struct option long_opts[] = {
 		{"interface", required_argument, NULL, 'i'},
 		{"central", required_argument, NULL, 'c'},
-		{"pin-root", required_argument, NULL, 'p'},
-		{"verbose", no_argument, NULL, 'v'},
+	{"pin-root", required_argument, NULL, 'p'},
+	{"agent-id", required_argument, NULL, 'a'},
+	{"verbose", no_argument, NULL, 'v'},
 		{"help", no_argument, NULL, 'h'},
 		{NULL, 0, NULL, 0},
 	};
@@ -83,7 +89,7 @@ int agent_options_parse(int argc, char **argv, struct agent_options *opts)
 
 	set_defaults(opts);
 
-	while ((c = getopt_long(argc, argv, "i:c:p:vh", long_opts, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "i:c:p:a:vh", long_opts, NULL)) != -1) {
 		switch (c) {
 		case 'i':
 			strncpy(opts->ifname, optarg, sizeof(opts->ifname) - 1);
@@ -101,6 +107,10 @@ int agent_options_parse(int argc, char **argv, struct agent_options *opts)
 		case 'p':
 			strncpy(opts->pin_root, optarg, sizeof(opts->pin_root) - 1);
 			opts->pin_root[sizeof(opts->pin_root) - 1] = '\0';
+			break;
+		case 'a':
+			strncpy(opts->agent_id, optarg, sizeof(opts->agent_id) - 1);
+			opts->agent_id[sizeof(opts->agent_id) - 1] = '\0';
 			break;
 		case 'v':
 			opts->verbose = true;

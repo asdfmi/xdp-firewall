@@ -1,16 +1,19 @@
 BPF_CLANG ?= clang
 BPF_ARCH ?= x86
-BPFTARGET := build/xdp_labeler.bpf.o
-XDPBLE_BIN := build/xdp-labeling
-BPF_SRC := bpf/xdp_labeler.bpf.c
 
-BPFOBJECTS := $(BPFTARGET)
+CC ?= gcc
+CXX ?= g++
+
+CFLAGS ?= -g -O2 -Wall -Wextra -std=c11
+CXXFLAGS ?= -g -O2 -Wall -Wextra -std=c++17
+CPPFLAGS ?=
+
+CPPFLAGS += -I. -Ixdp/include -Ibuild -Icli -Iagent -Icommon
 
 LIBBPF_CFLAGS ?= $(shell pkg-config --cflags libbpf 2>/dev/null)
 LIBBPF_LDLIBS ?= $(shell pkg-config --libs libbpf 2>/dev/null)
 LIBXDP_CFLAGS ?= $(shell pkg-config --cflags libxdp 2>/dev/null)
 LIBXDP_LDLIBS ?= $(shell pkg-config --libs libxdp 2>/dev/null)
-
 ifeq ($(strip $(LIBBPF_CFLAGS)),)
 LIBBPF_CFLAGS :=
 endif
@@ -27,82 +30,115 @@ ifeq ($(strip $(LIBXDP_LDLIBS)),)
 LIBXDP_LDLIBS := -lxdp
 endif
 
-LIBBPF_CFLAGS += -Ibuild -Iheaders
+THREAD_LDLIBS ?= -pthread
 
-all: $(XDPBLE_BIN) $(AGENT_BIN)
+BPFTARGET := build/xdp_labeler.bpf.o
+BPF_SRC := xdp/bpf/xdp_labeler.bpf.c
+
+CLI_SOURCES := \
+	cli/params.c \
+	cli/cmd/add.c \
+	cli/cmd/attach.c \
+	cli/cmd/detach.c \
+	cli/cmd/help.c \
+	cli/cmd/list.c \
+	cli/cmd/log.c \
+	cli/xdp-labeling.c
+
+LIB_SOURCES := \
+	xdp/lib/xdp_labeling.c
+
+AGENT_C_SOURCES := \
+	agent/xdp-agent.c \
+	agent/options.c \
+	agent/telemetry_client.c
+
+TELEMETRY_C_SOURCES := \
+	common/telemetry/telemetry.c
+
+CENTRAL_SOURCES := \
+    central/main.c \
+    central/http_server.c \
+    central/store.c
+
+SERVICE_SOURCES := \
+	service/health-server.c
+
+TEST_SOURCES := $(wildcard tests/integration/*.c)
+
+OBJDIR := build/obj
+
+CLI_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(CLI_SOURCES))
+LIB_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(LIB_SOURCES))
+TELEMETRY_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(TELEMETRY_C_SOURCES))
+
+AGENT_OBJS := \
+	$(patsubst %.c,$(OBJDIR)/%.o,$(AGENT_C_SOURCES)) \
+	$(TELEMETRY_OBJS)
+CENTRAL_OBJS := \
+	$(patsubst %.c,$(OBJDIR)/%.o,$(CENTRAL_SOURCES)) \
+	$(TELEMETRY_OBJS)
+SERVICE_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(SERVICE_SOURCES))
+
+TEST_BINS := $(patsubst tests/integration/%.c,build/tests/integration/%,$(TEST_SOURCES))
+
+XDPBLE_BIN := build/xdp-labeling
+AGENT_BIN := build/xdp-agent
+CENTRAL_BIN := build/central
+SERVICE_BIN := build/service-health
+
+SYS_INCLUDES := /usr/include /usr/include/$(shell uname -m)-linux-gnu
+
+.PHONY: all
+all: $(XDPBLE_BIN) $(AGENT_BIN) $(CENTRAL_BIN) $(SERVICE_BIN)
 
 build:
 	@mkdir -p build
 
-SYS_INCLUDES := /usr/include /usr/include/$(shell uname -m)-linux-gnu
+build/tests:
+	@mkdir -p build/tests
+
+build/tests/integration: | build/tests
+	@mkdir -p $@
+
+$(OBJDIR):
+	@mkdir -p $(OBJDIR)
 
 build/vmlinux.h: | build
 	bpftool btf dump file /sys/kernel/btf/vmlinux format c > $@
 
-$(BPFTARGET): $(BPF_SRC) headers/label_meta.h headers/rule.h build/vmlinux.h | build
+$(BPFTARGET): $(BPF_SRC) xdp/include/label_meta.h xdp/include/rule.h build/vmlinux.h | build
 	$(BPF_CLANG) -g -O2 -target bpf \
 		-D__TARGET_ARCH_$(BPF_ARCH) \
-		-Ibuild -Iheaders -I. \
+		-Ibuild -Ixdp/include -I. \
 		$(addprefix -isystem ,$(SYS_INCLUDES)) \
 		-c $< -o $@
 
-CLI_DIR := cli
-LIB_DIR := lib
+$(OBJDIR)/%.o: %.c | $(OBJDIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LIBBPF_CFLAGS) $(LIBXDP_CFLAGS) -c $< -o $@
 
-CLI_SOURCES := $(CLI_DIR)/params.c \
-	$(CLI_DIR)/cmd/add.c \
-	$(CLI_DIR)/cmd/attach.c \
-	$(CLI_DIR)/cmd/detach.c \
-	$(CLI_DIR)/cmd/help.c \
-	$(CLI_DIR)/cmd/list.c \
-	$(CLI_DIR)/cmd/log.c \
-	$(CLI_DIR)/xdp-labeling.c
+$(OBJDIR)/%.o: %.cc | $(OBJDIR)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(CPPFLAGS) $(LIBBPF_CFLAGS) $(LIBXDP_CFLAGS) -c $< -o $@
 
-LIB_SOURCES := $(LIB_DIR)/xdp_labeling.c
-
-CLI_CPPFLAGS := -Iheaders -I$(CLI_DIR)
-AGENT_DIR := agent
-AGENT_SOURCES := $(AGENT_DIR)/xdp-agent.c \
-	$(AGENT_DIR)/options.c
-AGENT_CPPFLAGS := -Iheaders -I$(AGENT_DIR)
-AGENT_BIN := build/xdp-agent
-
-TEST_DIR := tests
-TEST_SOURCES := $(wildcard $(TEST_DIR)/integration/*.c)
-TEST_BINS := $(patsubst $(TEST_DIR)/integration/%.c, build/tests/integration/%, $(TEST_SOURCES))
-TEST_CPPFLAGS := -Iheaders
-
-$(XDPBLE_BIN): $(CLI_SOURCES) $(LIB_SOURCES) $(BPFTARGET) | build
-	$(CC) -g -O2 -Wall -Wextra -std=c11 \
-		$(LIBBPF_CFLAGS) \
-		$(LIBXDP_CFLAGS) \
-		$(CLI_CPPFLAGS) \
-	$(CLI_SOURCES) \
-	$(LIB_SOURCES) \
-	-o $@ \
-	$(LIBBPF_LDLIBS) $(LIBXDP_LDLIBS)
-
-$(AGENT_BIN): $(AGENT_SOURCES) $(LIB_SOURCES) $(BPFTARGET) | build
-	$(CC) -g -O2 -Wall -Wextra -std=c11 \
-		$(LIBBPF_CFLAGS) \
-		$(LIBXDP_CFLAGS) \
-		$(AGENT_CPPFLAGS) \
-		$(AGENT_SOURCES) \
-		$(LIB_SOURCES) \
-		-o $@ \
+$(XDPBLE_BIN): $(CLI_OBJS) $(LIB_OBJS) $(BPFTARGET) | build
+	$(CC) $(CFLAGS) $(CLI_OBJS) $(LIB_OBJS) -o $@ \
 		$(LIBBPF_LDLIBS) $(LIBXDP_LDLIBS)
 
-build/tests/integration: | build
-	@mkdir -p $@
 
-build/tests/integration/%: $(TEST_DIR)/integration/%.c $(LIB_SOURCES) $(BPFTARGET) | build/tests/integration
-	$(CC) -g -O2 -Wall -Wextra -std=c11 \
-		$(LIBBPF_CFLAGS) \
-		$(LIBXDP_CFLAGS) \
-		$(TEST_CPPFLAGS) \
-		$< \
-		$(LIB_SOURCES) \
-		-o $@ \
+$(AGENT_BIN): $(AGENT_OBJS) $(LIB_OBJS) $(BPFTARGET) | build
+	$(CC) $(CFLAGS) $(AGENT_OBJS) $(LIB_OBJS) -o $@ \
+		$(LIBBPF_LDLIBS) $(LIBXDP_LDLIBS)
+
+$(CENTRAL_BIN): $(CENTRAL_OBJS) | build
+	$(CC) $(CFLAGS) $(CENTRAL_OBJS) -o $@ $(THREAD_LDLIBS)
+
+$(SERVICE_BIN): $(SERVICE_OBJS) | build
+	$(CC) $(CFLAGS) $(SERVICE_OBJS) -o $@ $(THREAD_LDLIBS)
+
+build/tests/integration/%: tests/integration/%.c $(LIB_OBJS) $(BPFTARGET) | build/tests/integration
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LIBBPF_CFLAGS) $(LIBXDP_CFLAGS) $< $(LIB_OBJS) -o $@ \
 		$(LIBBPF_LDLIBS) $(LIBXDP_LDLIBS)
 
 .PHONY: test

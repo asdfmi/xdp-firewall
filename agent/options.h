@@ -10,6 +10,7 @@ struct agent_options {
 	char pin_root[PATH_MAX];
 	char central_host[256];
 	unsigned short central_port;
+	char agent_id[64];
 	bool verbose;
 };
 

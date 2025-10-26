@@ -34,7 +34,7 @@ struct log_print_context {
 	bool saw_event;
 };
 
-static void log_event_cb(const struct xdp_label_packet *pkt, void *user_data)
+static void log_event_cb(struct xdp_label_packet *pkt, void *user_data)
 {
 	struct log_print_context *state = user_data;
 	char src_ip[INET_ADDRSTRLEN] = "-";
@@ -119,6 +119,8 @@ out_print:
 	       src_ip,
 	       dst_ip);
 	fflush(stdout);
+
+	pkt->forward_to_kernel = true;
 }
 
 int do_log(const void *cfg, __unused const char *pin_root_path)

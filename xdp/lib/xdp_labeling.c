@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <time.h>
@@ -30,6 +31,10 @@
 #endif
 #else
 #include <xdp/xsk.h>
+#endif
+
+#ifndef XDP_USE_NEED_WAKEUP
+#define XDP_USE_NEED_WAKEUP 0
 #endif
 
 #include "xdp_labeling.h"
@@ -67,6 +72,8 @@ struct xdp_labeling_event_session {
 	struct xsk_ring_prod fq;
 	struct xsk_ring_cons cq;
 	struct xsk_ring_cons rx;
+	struct xsk_ring_prod tx;
+	int xsk_fd;
 
 	xdp_labeling_event_cb event_cb;
 	void *event_user_data;
@@ -168,6 +175,7 @@ static void destroy_event_transport(struct xdp_labeling_event_session *session)
 		xsk_socket__delete(session->xsk);
 		session->xsk = NULL;
 	}
+	session->xsk_fd = -1;
 
 	if (session->umem) {
 		xsk_umem__delete(session->umem);
@@ -682,13 +690,58 @@ static __u64 realtime_now_ns(void)
 	return (__u64)ts.tv_sec * 1000000000ULL + (__u64)ts.tv_nsec;
 }
 
+static void event_session_reclaim_tx(struct xdp_labeling_event_session *session)
+{
+	__u64 addrs[XSK_BATCH_SIZE];
+	unsigned int idx_cq;
+	unsigned int completed;
+	unsigned int i;
+
+	if (!session)
+		return;
+
+	while ((completed = xsk_ring_cons__peek(&session->cq,
+						XSK_BATCH_SIZE, &idx_cq)) > 0) {
+		for (i = 0; i < completed; i++)
+			addrs[i] = *xsk_ring_cons__comp_addr(&session->cq,
+							     idx_cq + i);
+
+		xsk_ring_cons__release(&session->cq, completed);
+
+		for (i = 0; i < completed;) {
+			__u32 idx_fq;
+			unsigned int reserved =
+				xsk_ring_prod__reserve(&session->fq,
+						       completed - i,
+						       &idx_fq);
+			unsigned int j;
+
+			if (!reserved)
+				continue;
+
+			for (j = 0; j < reserved; j++)
+				*xsk_ring_prod__fill_addr(&session->fq,
+							  idx_fq + j) =
+					addrs[i + j];
+
+			xsk_ring_prod__submit(&session->fq, reserved);
+			i += reserved;
+		}
+	}
+}
+
 static int event_session_process_rx(struct xdp_labeling_event_session *session)
 {
 	__u64 addrs[XSK_BATCH_SIZE];
+	__u32 lengths[XSK_BATCH_SIZE];
+	bool forward_flags[XSK_BATCH_SIZE];
 	unsigned int handled = 0;
 	__u32 idx_rx;
 	unsigned int rcvd;
 	unsigned int i;
+	bool kick_tx = false;
+
+	event_session_reclaim_tx(session);
 
 	rcvd = xsk_ring_cons__peek(&session->rx, XSK_BATCH_SIZE, &idx_rx);
 	if (!rcvd)
@@ -703,9 +756,12 @@ static int event_session_process_rx(struct xdp_labeling_event_session *session)
 							 base_addr);
 		unsigned char *data = base ? base + offset : NULL;
 		const struct xdp_label_meta *meta;
-		struct xdp_label_packet packet;
+		struct xdp_label_packet packet = {0};
 
+		forward_flags[i] = false;
 		addrs[i] = desc->addr;
+		lengths[i] = desc->len;
+
 		if (!data)
 			continue;
 
@@ -730,29 +786,47 @@ static int event_session_process_rx(struct xdp_labeling_event_session *session)
 		packet.timestamp_ns = realtime_now_ns();
 		packet.ifindex = session->device->ifindex;
 		packet.queue_id = session->queue_id;
+		packet.forward_to_kernel = false;
 
 		session->event_cb(&packet, session->event_user_data);
+		if (packet.forward_to_kernel)
+			forward_flags[i] = true;
 		handled++;
 	}
 
 	xsk_ring_cons__release(&session->rx, rcvd);
 
-	for (i = 0; i < rcvd;) {
-		__u32 idx_fq;
-		unsigned int n = xsk_ring_prod__reserve(&session->fq,
-							rcvd - i, &idx_fq);
-		unsigned int j;
+	for (i = 0; i < rcvd; i++) {
+		if (forward_flags[i]) {
+			struct xdp_desc *tx_desc;
+			__u32 idx_tx;
 
-		if (!n)
-			continue;
+			while (!xsk_ring_prod__reserve(&session->tx, 1,
+						       &idx_tx))
+				event_session_reclaim_tx(session);
 
-		for (j = 0; j < n; j++)
-			*xsk_ring_prod__fill_addr(&session->fq, idx_fq + j) =
-				addrs[i + j];
+			tx_desc = xsk_ring_prod__tx_desc(&session->tx, idx_tx);
+			tx_desc->addr = addrs[i];
+			tx_desc->len = lengths[i];
 
-		xsk_ring_prod__submit(&session->fq, n);
-		i += n;
+			xsk_ring_prod__submit(&session->tx, 1);
+			if (xsk_ring_prod__needs_wakeup(&session->tx))
+				kick_tx = true;
+		} else {
+			__u32 idx_fq;
+
+			while (!xsk_ring_prod__reserve(&session->fq, 1,
+						       &idx_fq))
+				event_session_reclaim_tx(session);
+
+			*xsk_ring_prod__fill_addr(&session->fq, idx_fq) =
+				addrs[i];
+			xsk_ring_prod__submit(&session->fq, 1);
+		}
 	}
+
+	if (kick_tx && session->xsk_fd >= 0)
+		(void)sendto(session->xsk_fd, NULL, 0, MSG_DONTWAIT, NULL, 0);
 
 	return (int)handled;
 }
@@ -772,6 +846,7 @@ int xdp_labeling_event_session_open(const struct xdp_labeling_device *device,
 	session->device = device;
 	session->xsks_map_fd = -1;
 	session->queue_id = 0;
+	session->xsk_fd = -1;
 
 	*sessionp = session;
 	return 0;
@@ -794,10 +869,10 @@ int xdp_labeling_events_subscribe(struct xdp_labeling_event_session *session,
 {
 	struct xsk_socket_config xsk_cfg = {
 		.rx_size = XSK_RING_DEPTH,
-		.tx_size = 0,
+		.tx_size = XSK_RING_DEPTH,
 		.libbpf_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD,
 		.xdp_flags = 0,
-		.bind_flags = XDP_COPY,
+		.bind_flags = XDP_COPY | XDP_USE_NEED_WAKEUP,
 	};
 	int map_fd;
 	size_t bytes;
@@ -819,7 +894,7 @@ int xdp_labeling_events_subscribe(struct xdp_labeling_event_session *session,
 
 	err = xsk_socket__create(&session->xsk, session->device->ifname,
 				 session->queue_id, session->umem,
-				 &session->rx, NULL, &xsk_cfg);
+				 &session->rx, &session->tx, &xsk_cfg);
 	if (err)
 		goto err_cleanup_transport;
 
@@ -832,6 +907,7 @@ int xdp_labeling_events_subscribe(struct xdp_labeling_event_session *session,
 		err = -errno;
 		goto err_cleanup_transport;
 	}
+	session->xsk_fd = xsk_fd;
 
 	session->event_cb = callback;
 	session->event_user_data = user_data;

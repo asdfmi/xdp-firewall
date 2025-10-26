@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: xdp-agent
+  labels:
+    app: xdp-agent
+spec:
+  selector:
+    matchLabels:
+      app: xdp-agent
+  template:
+    metadata:
+      labels:
+        app: xdp-agent
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: xdp-agent
+          image: your-registry/xdp-agent:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          command: ["/usr/local/bin/xdp-agent"]
+          args:
+            - "--interface"
+            - "$(INTERFACE_NAME)"
+            - "--central"
+            - "central:50051"
+            - "--agent-id"
+            - "$(NODE_NAME)"
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: INTERFACE_NAME
+              value: "eth0"  # adjust per environment
+          volumeMounts:
+            - name: bpffs
+              mountPath: /sys/fs/bpf
+            - name: bpftool
+              mountPath: /usr/sbin/bpftool
+              readOnly: true
+      initContainers:
+        - name: xdp-attach
+          image: your-registry/xdp-cli:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          command: ["/usr/local/bin/xdp-labeling"]
+          args:
+            - "attach"
+            - "--interface"
+            - "$(INTERFACE_NAME)"
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: INTERFACE_NAME
+              value: "eth0"  # adjust per environment
+          volumeMounts:
+            - name: bpffs
+              mountPath: /sys/fs/bpf
+            - name: bpftool
+              mountPath: /usr/sbin/bpftool
+              readOnly: true
+      terminationGracePeriodSeconds: 30
+      tolerations:
+        - operator: Exists
+      volumes:
+        - name: bpffs
+          hostPath:
+            path: /sys/fs/bpf
+            type: Directory
+        - name: bpftool
+          hostPath:
+            path: /usr/sbin/bpftool
+            type: File
+      lifecycle:
+        preStop:
+          exec:
+            command:
+              - /usr/local/bin/xdp-labeling
+              - detach
+              - --interface
+              - "$(INTERFACE_NAME)"
