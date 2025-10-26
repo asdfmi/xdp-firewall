@@ -27,6 +27,25 @@ static void usage(const char *prog)
 	fprintf(stderr, "Usage: %s [port]\n", prog);
 }
 
+static int install_signal_handlers(void)
+{
+	struct sigaction sa = {
+		.sa_handler = handle_signal,
+	};
+
+	if (sigemptyset(&sa.sa_mask) != 0)
+		return -1;
+
+	sa.sa_flags = 0; /* ensure accept() is interrupted */
+
+	if (sigaction(SIGINT, &sa, NULL) != 0)
+		return -1;
+	if (sigaction(SIGTERM, &sa, NULL) != 0)
+		return -1;
+
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	int port = DEFAULT_PORT;
@@ -52,9 +71,8 @@ int main(int argc, char **argv)
 		port = (int)parsed;
 	}
 
-	if (signal(SIGINT, handle_signal) == SIG_ERR ||
-	    signal(SIGTERM, handle_signal) == SIG_ERR) {
-		perror("signal");
+	if (install_signal_handlers() != 0) {
+		perror("sigaction");
 		return EXIT_FAILURE;
 	}
 
@@ -98,11 +116,22 @@ int main(int argc, char **argv)
 		client_fd = accept4(server_fd, (struct sockaddr *)&client_addr,
 				    &client_len, SOCK_CLOEXEC);
 		if (client_fd < 0) {
-			if (errno == EINTR && stop_server)
-				break;
+			if (errno == EINTR) {
+				if (stop_server)
+					break;
+				continue;
+			}
 			perror("accept");
 			continue;
 		}
+
+		char addr_str[INET_ADDRSTRLEN] = "unknown";
+		if (inet_ntop(AF_INET, &client_addr.sin_addr,
+			      addr_str, sizeof(addr_str)) == NULL)
+			strncpy(addr_str, "invalid", sizeof(addr_str) - 1);
+
+		printf("health-server: accepted connection from %s:%u\n",
+		       addr_str, ntohs(client_addr.sin_port));
 
 		(void)recv(client_fd, buf, sizeof(buf), 0);
 

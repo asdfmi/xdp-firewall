@@ -28,36 +28,6 @@ Artifacts are placed in `build/`:
 - `build/service-health` — sample service
 - `build/xdp.bpf.o` — compiled eBPF program
 
-## Local PoC Walkthrough
-
-1. Attach the XDP program and pin maps using the CLI:
-   ```bash
-   sudo build/xdt attach --interface <ifname>
-   ```
-2. Insert IPv4 rules as needed (e.g. `build/xdt add ...`).
-3. Start the telemetry server:
-   ```bash
-   ./build/central 50051 8080   # telemetry port, HTTP UI port
-   ```
-4. Start the agent (requires root, interface, central endpoint, optional agent id):
-   ```bash
-   sudo ./build/xdt-agent \
-     --interface <ifname> \
-     --central 127.0.0.1:50051 \
-     --agent-id $(hostname)
-   ```
-5. Run the demo service:
-   ```bash
-   ./build/service-health 8081
-   ```
-6. Generate some traffic to the service (`curl http://localhost:8081/healthz`).
-7. Open the dashboard: `http://localhost:8080/` to see per-agent charts and recent events.
-
-Detach when finished:
-```bash
-sudo build/xdt detach --interface <ifname>
-```
-
 ## Kubernetes Sample (kind)
 
 Sample manifests live in `k8s/`. You can exercise them locally with a kind cluster:

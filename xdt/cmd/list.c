@@ -55,7 +55,7 @@ const struct listopt defaults_list = {};
 
 struct prog_option list_options[] = {
 	DEFINE_OPTION("interface", OPT_IFNAME, struct listopt, iface,
-		.short_opt = 'f',
+		.short_opt = 'i',
 		.metavar = "<ifname>",
 		.required = true,
 		.help = "Interface whose IPv4 rules map to display"),
