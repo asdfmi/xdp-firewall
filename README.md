@@ -1,11 +1,11 @@
 # XDP Telemetry (PoC)
 
-This repository contains a monorepo PoC that applies XDP/eBPF to label packets, forwards traffic back to the service path, and streams metadata to a central telemetry server with a lightweight UI. The project is organised as modular components so it can later be split into separate services if needed.
+This repository contains a monorepo PoC that applies XDP/eBPF to label packets, forwards traffic back to the service path using `AF_XDP` zero-copy rings, and streams metadata to a central telemetry server with a lightweight UI. The project is organised as modular components so it can later be split into separate services if needed.
 
 ## Components
 
 - **xdp/** — eBPF program (`xdp/bpf/xdp_labeler.bpf.c`) and user-space helpers (`xdp/lib/xdt_telemetry.c`, headers under `xdp/include/`).
-- **agent/** — `xdt-agent` binary. Attaches to the pinned maps, receives events via AF_XDP, reinjects packets, and streams telemetry records to the central server. Command-line options are parsed in `agent/options.c`.
+- **agent/** — `xdt-agent` binary. Attaches to the pinned maps, receives events via `AF_XDP`, reinjects packets, and streams telemetry records to the central server. Command-line options are parsed in `agent/options.c`.
 - **central/** — Telemetry server. Receives binary telemetry streams, keeps in-memory statistics per agent, exposes `/metrics.json`, and serves the dashboard UI under `central/ui/static/`.
 - **service/** — Minimal HTTP health server that listens on `/healthz`; acts as a placeholder for the protected business application.
 - **cli/** — `xdt` CLI tool for attach/detach, rule management, and debugging (uses the shared library under `xdp/`).
