@@ -10,7 +10,6 @@
 #include <unistd.h>
 #include <linux/limits.h>
 #include <linux/if_ether.h>
-#include <linux/tcp.h>
 
 #include "cli_shared.h"
 #include "xdt.h"
@@ -30,8 +29,8 @@ struct prog_option log_options[] = {
 };
 
 struct log_print_context {
-	__u32 filter_ifindex;
-	bool saw_event;
+    __u32 filter_ifindex;
+    bool saw_event;
 };
 
 static void log_event_cb(struct xdp_telemetry_packet *pkt, void *user_data)
@@ -57,51 +56,63 @@ static void log_event_cb(struct xdp_telemetry_packet *pkt, void *user_data)
 
 	state->saw_event = true;
 
-	data = pkt->data;
-	if (!data)
-		goto out_print;
+    /* Prefer pre-parsed fields if available (ringbuf path), else parse sample */
+    if (pkt->addr_family == AF_INET && pkt->src_ipv4 && pkt->dst_ipv4) {
+        addr_family = pkt->addr_family;
+        ip_proto = pkt->ip_proto;
+        src_port = pkt->src_port;
+        dst_port = pkt->dst_port;
+        if (!inet_ntop(AF_INET, &pkt->src_ipv4, src_ip, sizeof(src_ip)))
+            snprintf(src_ip, sizeof(src_ip), "invalid");
+        if (!inet_ntop(AF_INET, &pkt->dst_ipv4, dst_ip, sizeof(dst_ip)))
+            snprintf(dst_ip, sizeof(dst_ip), "invalid");
+    } else {
+        data = pkt->data;
+        if (!data)
+            goto out_print;
 
-	data_end = data + pkt->data_len;
-	if (pkt->data_len < sizeof(*eth))
-		goto out_print;
+        data_end = data + pkt->data_len;
+        if (pkt->data_len < sizeof(*eth))
+            goto out_print;
 
-	eth = (const struct ethhdr *)data;
-	if ((const unsigned char *)(eth + 1) > data_end)
-		goto out_print;
+        eth = (const struct ethhdr *)data;
+        if ((const unsigned char *)(eth + 1) > data_end)
+            goto out_print;
 
-	if (ntohs(eth->h_proto) != ETH_P_IP)
-		goto out_print;
+        if (ntohs(eth->h_proto) != ETH_P_IP)
+            goto out_print;
 
-	iph = (const struct iphdr *)(eth + 1);
-	if ((const unsigned char *)(iph + 1) > data_end)
-		goto out_print;
+        iph = (const struct iphdr *)(eth + 1);
+        if ((const unsigned char *)(iph + 1) > data_end)
+            goto out_print;
 
-	addr_family = AF_INET;
-	ip_proto = iph->protocol;
-	if (!inet_ntop(AF_INET, &iph->saddr, src_ip, sizeof(src_ip)))
-		snprintf(src_ip, sizeof(src_ip), "invalid");
-	if (!inet_ntop(AF_INET, &iph->daddr, dst_ip, sizeof(dst_ip)))
-		snprintf(dst_ip, sizeof(dst_ip), "invalid");
+        addr_family = AF_INET;
+        ip_proto = iph->protocol;
+        if (!inet_ntop(AF_INET, &iph->saddr, src_ip, sizeof(src_ip)))
+            snprintf(src_ip, sizeof(src_ip), "invalid");
+        if (!inet_ntop(AF_INET, &iph->daddr, dst_ip, sizeof(dst_ip)))
+            snprintf(dst_ip, sizeof(dst_ip), "invalid");
 
-	l4 = (const unsigned char *)iph + iph->ihl * 4;
-	if (l4 > data_end)
-		goto out_print;
+        l4 = (const unsigned char *)iph + iph->ihl * 4;
+        if (l4 > data_end)
+            goto out_print;
 
-	if (ip_proto == IPPROTO_TCP) {
-		const struct tcphdr *th = (const struct tcphdr *)l4;
+        if (ip_proto == IPPROTO_TCP) {
+            const struct tcphdr *th = (const struct tcphdr *)l4;
 
-		if ((const unsigned char *)(th + 1) > data_end)
-			goto out_print;
-		src_port = ntohs(th->source);
-		dst_port = ntohs(th->dest);
-	} else if (ip_proto == IPPROTO_UDP) {
-		const struct udphdr *uh = (const struct udphdr *)l4;
+            if ((const unsigned char *)(th + 1) > data_end)
+                goto out_print;
+            src_port = ntohs(th->source);
+            dst_port = ntohs(th->dest);
+        } else if (ip_proto == IPPROTO_UDP) {
+            const struct udphdr *uh = (const struct udphdr *)l4;
 
-		if ((const unsigned char *)(uh + 1) > data_end)
-			goto out_print;
-		src_port = ntohs(uh->source);
-		dst_port = ntohs(uh->dest);
-	}
+            if ((const unsigned char *)(uh + 1) > data_end)
+                goto out_print;
+            src_port = ntohs(uh->source);
+            dst_port = ntohs(uh->dest);
+        }
+    }
 
 out_print:
 	printf("timestamp=%llu ifindex=%u queue=%u len=%zu action=%u label_id=%u "

@@ -47,33 +47,14 @@ static int read_exact(int fd, unsigned char *buf, size_t len)
 	return 0;
 }
 
-static void print_packet(const struct telemetry_packet *pkt)
-{
-	const char *src = pkt->src_ip[0] ? pkt->src_ip : "-";
-	const char *dst = pkt->dst_ip[0] ? pkt->dst_ip : "-";
-
-	printf("packet ts=%llu ifindex=%u queue=%u action=%u label=%u len=%u "
-	       "src=%s dst=%s src_port=%u dst_port=%u payload_len=%zu\n",
-	       (unsigned long long)pkt->timestamp_ns,
-	       pkt->ifindex,
-	       pkt->queue_id,
-	       pkt->action,
-	       pkt->label_id,
-	       pkt->data_len,
-	       src,
-	       dst,
-	       pkt->src_port,
-	       pkt->dst_port,
-	       pkt->payload_len);
-	fflush(stdout);
-}
-
 static void handle_client(int fd, struct telemetry_store *store)
 {
-	unsigned char len_buf[4];
-	unsigned char payload[RECV_BUFFER];
-	struct telemetry_packet pkt;
-	size_t frame_len;
+    unsigned char len_buf[4];
+    unsigned char payload[RECV_BUFFER];
+    struct telemetry_packet pkt;
+    size_t frame_len;
+    fprintf(stdout, "central: client connected fd=%d\n", fd);
+    fflush(stdout);
 
 	while (!stop_flag) {
 		if (read_exact(fd, len_buf, sizeof(len_buf))) {
@@ -85,27 +66,50 @@ static void handle_client(int fd, struct telemetry_store *store)
 			    ((size_t)len_buf[2] << 16) |
 			    ((size_t)len_buf[3] << 24);
 
-		if (frame_len == 0 || frame_len > sizeof(payload)) {
-			fprintf(stderr,
-				"central: invalid frame length %zu\n",
-				frame_len);
-			break;
-		}
+        if (frame_len == 0 || frame_len > sizeof(payload)) {
+            fprintf(stderr,
+                    "central: invalid frame length %zu\n",
+                    frame_len);
+            fflush(stderr);
+            break;
+        }
 
 		if (read_exact(fd, payload, frame_len)) {
 			break;
 		}
 
 		telemetry_packet_init(&pkt);
-		if (telemetry_packet_decode(&pkt, payload, frame_len)) {
-			fprintf(stderr,
-				"central: failed to decode telemetry frame\n");
-			break;
-		}
+        if (telemetry_packet_decode(&pkt, payload, frame_len)) {
+            fprintf(stderr,
+                    "central: failed to decode telemetry frame (len=%zu)\n",
+                    frame_len);
+            fflush(stderr);
+            break;
+        }
 
-        print_packet(&pkt);
         telemetry_store_record(store, &pkt);
-	}
+        fprintf(stdout, "central: stored event (agent_id='%s')\n", pkt.agent_id);
+        fflush(stdout);
+    }
+}
+
+struct client_thread_args {
+    int fd;
+    struct telemetry_store *store;
+};
+
+static void *client_thread_main(void *arg)
+{
+    struct client_thread_args *args = (struct client_thread_args *)arg;
+    int fd = -1;
+    if (!args)
+        return NULL;
+    fd = args->fd;
+    handle_client(fd, args->store);
+    if (fd >= 0)
+        close(fd);
+    free(args);
+    return NULL;
 }
 
 int main(int argc, char **argv)
@@ -160,10 +164,13 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
-	if (telemetry_store_init(&store) != 0) {
-		fprintf(stderr, "central: failed to init telemetry store\n");
-		return EXIT_FAILURE;
-	}
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
+
+    if (telemetry_store_init(&store) != 0) {
+        fprintf(stderr, "central: failed to init telemetry store\n");
+        return EXIT_FAILURE;
+    }
 
 	struct http_server_config http_cfg = {
 		.host = NULL,
@@ -211,6 +218,8 @@ int main(int argc, char **argv)
 		struct sockaddr_in client_addr;
 		socklen_t client_len = sizeof(client_addr);
 		int client_fd;
+		struct client_thread_args *args;
+		pthread_t th;
 
 		client_fd = accept4(server_fd, (struct sockaddr *)&client_addr,
 				    &client_len, SOCK_CLOEXEC);
@@ -221,8 +230,23 @@ int main(int argc, char **argv)
 			continue;
 		}
 
-		handle_client(client_fd, store);
-		close(client_fd);
+		args = calloc(1, sizeof(*args));
+		if (!args) {
+			perror("calloc");
+			close(client_fd);
+			continue;
+		}
+		args->fd = client_fd;
+		args->store = store;
+
+		if (pthread_create(&th, NULL, client_thread_main, args) != 0) {
+			perror("pthread_create");
+			close(client_fd);
+			free(args);
+			continue;
+		}
+		/* Detach so resources are reclaimed when thread exits */
+		pthread_detach(th);
 	}
 
 out:

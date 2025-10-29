@@ -50,13 +50,20 @@ struct xdp_telemetry_event_filter {
 };
 
 struct xdp_telemetry_packet {
-	struct xdp_label_meta meta;
-	const void *data;
-	size_t data_len;
-	__u64 timestamp_ns;
-	__u32 ifindex;
-	__u32 queue_id;
-	bool forward_to_kernel;
+    struct xdp_label_meta meta;
+    const void *data;
+    size_t data_len;
+    __u64 timestamp_ns;
+    __u32 ifindex;
+    __u32 queue_id;
+    bool forward_to_kernel;
+    /* Optional pre-parsed header metadata (0 if unknown) */
+    __u8  addr_family;
+    __u8  ip_proto;
+    __u16 src_port;
+    __u16 dst_port;
+    __u32 src_ipv4; /* network order */
+    __u32 dst_ipv4; /* network order */
 };
 
 typedef void (*xdp_telemetry_event_cb)(struct xdp_telemetry_packet *packet,

@@ -16,10 +16,13 @@
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
 #include <stdbool.h>
+#include <sched.h>
+#include <fcntl.h>
 
 #include "params.h"
 #include "telemetry_client.h"
 #include "xdp_telemetry.h"
+#include <limits.h>
 
 #define AGENT_POLL_TIMEOUT_MS 1000
 #define AGENT_DEFAULT_CENTRAL "127.0.0.1:50051"
@@ -30,6 +33,7 @@ struct agent_options {
 	char central_host[256];
 	unsigned short central_port;
 	char agent_id[64];
+	int netns_pid; /* 0 if not set */
 	bool verbose;
 };
 
@@ -38,6 +42,7 @@ struct agent_cli_config {
 	const char *central;
 	const char *pin_root;
 	const char *agent_id;
+	const char *netns_pid; /* string value parsed into opts */
 	bool verbose;
 };
 
@@ -59,6 +64,10 @@ static struct prog_option agent_prog_options[] = {
 		.short_opt = 'a',
 		.metavar = "<id>",
 		.help = "Identifier reported to central"),
+	DEFINE_OPTION("netns-pid", OPT_STRING, struct agent_cli_config, netns_pid,
+		.short_opt = 'n',
+		.metavar = "<pid>",
+		.help = "Temporarily enter target netns by PID to attach (e.g. service pod eth0)"),
 	DEFINE_OPTION("verbose", OPT_BOOL, struct agent_cli_config, verbose,
 		.short_opt = 'v',
 		.help = "Enable verbose logging"),
@@ -150,13 +159,40 @@ static int agent_options_parse(int argc, char **argv, struct agent_options *opts
 
 	opts->verbose = cfg.verbose;
 
-	if (!cfg.iface.ifname) {
-		fprintf(stderr, "agent: --interface is required\n");
-		return -EINVAL;
-	}
+    /* Parse optional netns-pid */
+    if (cfg.netns_pid && cfg.netns_pid[0]) {
+        char *end = NULL;
+        long v = strtol(cfg.netns_pid, &end, 10);
+        if (!end || *end != '\0' || v <= 0 || v > INT_MAX) {
+            fprintf(stderr, "agent: invalid --netns-pid value '%s'\n", cfg.netns_pid);
+            return -EINVAL;
+        }
+        opts->netns_pid = (int)v;
+    } else {
+        opts->netns_pid = 0;
+    }
 
-	strncpy(opts->ifname, cfg.iface.ifname, sizeof(opts->ifname) - 1);
-	opts->ifname[sizeof(opts->ifname) - 1] = '\0';
+    if (!cfg.iface.ifname) {
+        const char *env_if = getenv("INTERFACE_NAME");
+        if (!env_if || !env_if[0]) {
+            fprintf(stderr, "agent: --interface is required (or set INTERFACE_NAME)\n");
+            return -EINVAL;
+        }
+        strncpy(opts->ifname, env_if, sizeof(opts->ifname) - 1);
+        opts->ifname[sizeof(opts->ifname) - 1] = '\0';
+    } else {
+        /* Support literal "$(INTERFACE_NAME)" by falling back to env */
+        if (strcmp(cfg.iface.ifname, "$(INTERFACE_NAME)") == 0) {
+            const char *env_if = getenv("INTERFACE_NAME");
+            if (env_if && env_if[0])
+                strncpy(opts->ifname, env_if, sizeof(opts->ifname) - 1);
+            else
+                strncpy(opts->ifname, cfg.iface.ifname, sizeof(opts->ifname) - 1);
+        } else {
+            strncpy(opts->ifname, cfg.iface.ifname, sizeof(opts->ifname) - 1);
+        }
+        opts->ifname[sizeof(opts->ifname) - 1] = '\0';
+    }
 
 	return 0;
 }
@@ -168,6 +204,7 @@ struct send_context {
     struct telemetry_client *client;
     bool verbose;
     bool warned_client;
+    long long mono_to_real_ns;
 };
 
 static void handle_signal(int signo)
@@ -200,11 +237,11 @@ static void print_packet_stub(const struct telemetry_packet *packet,
 }
 
 static void prepare_telemetry_packet(const struct xdp_telemetry_packet *pkt,
-				     struct telemetry_packet *out)
+                                     struct telemetry_packet *out)
 {
-	const unsigned char *data = pkt->data;
-	const unsigned char *data_end = data ? data + pkt->data_len : NULL;
-	const struct ethhdr *eth;
+    const unsigned char *data = pkt->data;
+    const unsigned char *data_end = data ? data + pkt->data_len : NULL;
+    const struct ethhdr *eth;
 
 	memset(out, 0, sizeof(*out));
 
@@ -215,8 +252,27 @@ static void prepare_telemetry_packet(const struct xdp_telemetry_packet *pkt,
 	out->label_id = pkt->meta.label_id;
 	out->data_len = pkt->data_len;
 
-	if (!data || pkt->data_len < sizeof(*eth))
-		return;
+    /* Prefer pre-parsed fields from ringbuf if present */
+    if (pkt->addr_family == AF_INET && pkt->src_ipv4 && pkt->dst_ipv4) {
+        if (!inet_ntop(AF_INET, &pkt->src_ipv4, out->src_ip,
+                       sizeof(out->src_ip)))
+            snprintf(out->src_ip, sizeof(out->src_ip), "invalid");
+        if (!inet_ntop(AF_INET, &pkt->dst_ipv4, out->dst_ip,
+                       sizeof(out->dst_ip)))
+            snprintf(out->dst_ip, sizeof(out->dst_ip), "invalid");
+        out->src_port = pkt->src_port;
+        out->dst_port = pkt->dst_port;
+        /* payload sample */
+        if (data && pkt->data_len > 0) {
+            out->payload_len = pkt->data_len < TELEMETRY_MAX_PAYLOAD ?
+                               pkt->data_len : TELEMETRY_MAX_PAYLOAD;
+            memcpy(out->payload, data, out->payload_len);
+        }
+        return;
+    }
+
+    if (!data || pkt->data_len < sizeof(*eth))
+        return;
 
 	out->payload_len = pkt->data_len < TELEMETRY_MAX_PAYLOAD ?
 		pkt->data_len : TELEMETRY_MAX_PAYLOAD;
@@ -266,20 +322,52 @@ static void prepare_telemetry_packet(const struct xdp_telemetry_packet *pkt,
 
 static void event_dispatch_cb(struct xdp_telemetry_packet *pkt, void *user_data)
 {
-	struct send_context *ctx = user_data;
-	struct telemetry_packet packet;
-	int ret;
+    struct send_context *ctx = user_data;
+    struct telemetry_packet packet;
+    int ret;
 
 	if (!pkt || !ctx)
 		return;
 
-	prepare_telemetry_packet(pkt, &packet);
+    prepare_telemetry_packet(pkt, &packet);
+    /* Convert monotonic ns (from BPF/ktime) to realtime ns for UI bucketing */
+    if (ctx && ctx->mono_to_real_ns) {
+        unsigned long long adj = (unsigned long long)((long long)packet.timestamp_ns + ctx->mono_to_real_ns);
+        packet.timestamp_ns = adj;
+    }
 	strncpy(packet.agent_id, ctx->opts->agent_id,
 		sizeof(packet.agent_id) - 1);
 	packet.agent_id[sizeof(packet.agent_id) - 1] = '\0';
 
+    /* Ensure client is connected; attempt lazy connect on first event */
+    if (!ctx->client) {
+        if (telemetry_client_create(&ctx->client,
+                    ctx->opts->central_host,
+                    ctx->opts->central_port) != 0) {
+            if (!ctx->warned_client) {
+                fprintf(stderr,
+                    "agent: failed to connect telemetry client to %s:%u\n",
+                    ctx->opts->central_host,
+                    ctx->opts->central_port);
+                ctx->warned_client = true;
+            }
+        } else {
+            ctx->warned_client = false;
+        }
+    }
+
     if (ctx->client) {
         ret = telemetry_client_send(ctx->client, &packet);
+        if (ret != 0) {
+            /* Reconnect once on failure */
+            telemetry_client_destroy(ctx->client);
+            ctx->client = NULL;
+            if (telemetry_client_create(&ctx->client,
+                        ctx->opts->central_host,
+                        ctx->opts->central_port) == 0) {
+                ret = telemetry_client_send(ctx->client, &packet);
+            }
+        }
         if (ret == 0) {
             ctx->warned_client = false;
         } else if (!ctx->warned_client) {
@@ -299,8 +387,8 @@ static void event_dispatch_cb(struct xdp_telemetry_packet *pkt, void *user_data)
 
 static int run_agent(const struct agent_options *opts)
 {
-	struct xdp_telemetry_device *device = NULL;
-	struct xdp_telemetry_event_session *events = NULL;
+    struct xdp_telemetry_device *device = NULL;
+    struct xdp_telemetry_event_session *events = NULL;
 	struct send_context send_ctx = {
 		.opts = opts,
 		.client = NULL,
@@ -315,7 +403,71 @@ static int run_agent(const struct agent_options *opts)
 		.pin_path = opts->pin_root,
 	};
     int err;
+    int i;
+    int orig_netns_fd = -1;
+    int target_netns_fd = -1;
+    struct timespec ts_mono = {0}, ts_real = {0};
 
+    /* If requested, temporarily enter target netns before resolving ifindex and attaching */
+    if (opts->netns_pid > 0) {
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%d/ns/net", opts->netns_pid);
+        orig_netns_fd = open("/proc/self/ns/net", O_RDONLY | O_CLOEXEC);
+        target_netns_fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (orig_netns_fd < 0 || target_netns_fd < 0) {
+            fprintf(stderr, "agent: failed to open netns fds (pid=%d)\n", opts->netns_pid);
+            if (target_netns_fd >= 0) close(target_netns_fd);
+            if (orig_netns_fd >= 0) close(orig_netns_fd);
+            return EXIT_FAILURE;
+        }
+        if (setns(target_netns_fd, CLONE_NEWNET) != 0) {
+            perror("agent: setns(CLONE_NEWNET)");
+            close(target_netns_fd);
+            close(orig_netns_fd);
+            return EXIT_FAILURE;
+        }
+        /* We are now in target netns; proceed to open/attach, then restore */
+    }
+
+    /* Defer central connection until after potential netns restore (to use host netns) */
+
+    err = xdp_telemetry_device_open(&device, &attach_opts);
+    if (err) {
+        fprintf(stderr, "agent: failed to prepare device context: %s\n",
+                strerror(-err));
+        goto out_restore_netns;
+    }
+
+    /* Attach XDP with simple retries (interface/bpffs readiness) */
+    for (i = 0; i < 10; i++) {
+        err = xdp_telemetry_device_attach(device);
+        if (!err)
+            break;
+        fprintf(stderr, "agent: attach failed on %s: %s (retry %d)\n",
+                opts->ifname, strerror(-err), i + 1);
+        sleep(1);
+    }
+    if (err) {
+        fprintf(stderr, "agent: giving up attach on %s\n", opts->ifname);
+        goto out_restore_netns;
+    }
+
+    /* Restore to original netns so that userland sockets (central TCP) use host netns */
+out_restore_netns:
+    if (opts->netns_pid > 0) {
+        if (orig_netns_fd >= 0) {
+            if (setns(orig_netns_fd, CLONE_NEWNET) != 0) {
+                perror("agent: restore setns(CLONE_NEWNET)");
+            }
+            close(orig_netns_fd);
+        }
+        if (target_netns_fd >= 0) close(target_netns_fd);
+    }
+
+    if (err)
+        goto out;
+
+    /* Now connect telemetry client from (restored) host netns */
     if (telemetry_client_create(&send_ctx.client, opts->central_host,
                 opts->central_port) != 0) {
         fprintf(stderr,
@@ -323,18 +475,21 @@ static int run_agent(const struct agent_options *opts)
             opts->central_host, opts->central_port);
     }
 
-	err = xdp_telemetry_device_open(&device, &attach_opts);
-	if (err) {
-		fprintf(stderr, "agent: failed to prepare device context: %s\n",
-			strerror(-err));
-		return EXIT_FAILURE;
-	}
+    /* Calibrate monotonic->realtime offset once (used for UI wall-clock bucketing) */
+    if (clock_gettime(CLOCK_MONOTONIC, &ts_mono) == 0 &&
+        clock_gettime(CLOCK_REALTIME, &ts_real) == 0) {
+        long long mono_ns = (long long)ts_mono.tv_sec * 1000000000LL + (long long)ts_mono.tv_nsec;
+        long long real_ns = (long long)ts_real.tv_sec * 1000000000LL + (long long)ts_real.tv_nsec;
+        send_ctx.mono_to_real_ns = real_ns - mono_ns;
+    } else {
+        send_ctx.mono_to_real_ns = 0;
+    }
 
-	err = xdp_telemetry_event_session_open(device, &events);
-	if (err) {
-		fprintf(stderr, "agent: failed to open event session: %s\n",
-			strerror(-err));
-		goto out;
+    err = xdp_telemetry_event_session_open(device, &events);
+    if (err) {
+        fprintf(stderr, "agent: failed to open event session: %s\n",
+                strerror(-err));
+        goto out;
 	}
 
 	err = xdp_telemetry_events_subscribe(events, NULL,
@@ -359,11 +514,14 @@ static int run_agent(const struct agent_options *opts)
 	xdp_telemetry_events_unsubscribe(events);
 
 out:
-	if (events)
-		xdp_telemetry_event_session_close(events);
-	xdp_telemetry_device_close(device);
-	telemetry_client_destroy(send_ctx.client);
-	return err ? EXIT_FAILURE : EXIT_SUCCESS;
+    if (events)
+        xdp_telemetry_event_session_close(events);
+    if (device) {
+        (void)xdp_telemetry_device_detach(device);
+        xdp_telemetry_device_close(device);
+    }
+    telemetry_client_destroy(send_ctx.client);
+    return err ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
 int main(int argc, char **argv)

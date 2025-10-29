@@ -72,8 +72,41 @@ static void send_response_header(int fd, const char *status,
 		"HTTP/1.0 %s\r\n"
 		"Content-Type: %s\r\n"
 		"Cache-Control: no-store\r\n"
+		"Connection: close\r\n"
 		"\r\n",
 		status, content_type);
+}
+
+static void send_response_header_with_length(int fd, const char *status,
+                                            const char *content_type,
+                                            size_t content_length)
+{
+    dprintf(fd,
+            "HTTP/1.0 %s\r\n"
+            "Content-Type: %s\r\n"
+            "Cache-Control: no-store\r\n"
+            "Content-Length: %zu\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            status, content_type, content_length);
+}
+
+static int send_all(int fd, const void *buf, size_t len)
+{
+    const unsigned char *p = (const unsigned char *)buf;
+    while (len > 0) {
+        ssize_t n = send(fd, p, len, 0);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (n == 0)
+            return -1;
+        p += n;
+        len -= (size_t)n;
+    }
+    return 0;
 }
 
 static void send_not_found(int fd)
@@ -91,70 +124,81 @@ static void send_server_error(int fd)
 
 static void send_metrics_json(int fd, struct telemetry_store *store)
 {
-	struct telemetry_snapshot snapshot;
-	size_t i, j;
+    struct telemetry_snapshot *snapshot = NULL;
+    size_t i, j;
+    char *body = NULL;
+    size_t body_len = 0;
+    FILE *m;
 
-	telemetry_store_snapshot(store, &snapshot);
+    snapshot = calloc(1, sizeof(*snapshot));
+    if (!snapshot) {
+        send_server_error(fd);
+        return;
+    }
 
-	send_response_header(fd, "200 OK", "application/json; charset=utf-8");
+    telemetry_store_snapshot(store, snapshot);
 
-	dprintf(fd, "{ \"total_events\": %llu, \"nodes\": [",
-		(unsigned long long)snapshot.total_events);
+    m = open_memstream(&body, &body_len);
+    if (!m) {
+        send_server_error(fd);
+        return;
+    }
 
-	for (i = 0; i < snapshot.node_count; i++) {
-		const struct telemetry_node_snapshot *node = &snapshot.nodes[i];
+    fprintf(m, "{ \"total_events\": %llu, \"nodes\": [",
+            (unsigned long long)snapshot->total_events);
 
-		dprintf(fd, "%s{\"agent_id\": \"%s\", \"total_events\": %llu, \"label_counts\": [",
-			i ? ", " : "",
-			node->agent_id[0] ? node->agent_id : "unknown",
-			(unsigned long long)node->total_events);
+    for (i = 0; i < snapshot->node_count; i++) {
+        const struct telemetry_node_snapshot *node = &snapshot->nodes[i];
 
-		for (j = 0; j < node->label_count; j++) {
-			dprintf(fd,
-				"%s{\"label_id\": %u, \"count\": %llu}",
-				j ? ", " : "",
-				node->labels[j].label_id,
-				(unsigned long long)node->labels[j].count);
-		}
+        fprintf(m,
+                "%s{\"agent_id\": \"%s\", \"total_events\": %llu, \"label_counts\": ",
+                i ? ", " : "",
+                node->agent_id[0] ? node->agent_id : "unknown",
+                (unsigned long long)node->total_events);
 
-		dprintf(fd, "], \"recent_events\": [");
+        fprintf(m, "[");
+        for (j = 0; j < node->label_count; j++) {
+            fprintf(m, "%s{\"label_id\": %u, \"count\": %llu}",
+                    j ? ", " : "",
+                    node->labels[j].label_id,
+                    (unsigned long long)node->labels[j].count);
+        }
+        fprintf(m, "], \"recent_events\": [");
 
-		for (j = 0; j < node->event_count; j++) {
-			const struct telemetry_packet *pkt =
-				&node->events[j].packet;
-			const char *src_ip = pkt->src_ip[0] ? pkt->src_ip : "-";
-			const char *dst_ip = pkt->dst_ip[0] ? pkt->dst_ip : "-";
+        for (j = 0; j < node->event_count; j++) {
+            const struct telemetry_packet *pkt = &node->events[j].packet;
+            const char *src_ip = pkt->src_ip[0] ? pkt->src_ip : "-";
+            const char *dst_ip = pkt->dst_ip[0] ? pkt->dst_ip : "-";
 
-			dprintf(fd,
-				"%s{"
-				"\"timestamp_ns\": %llu,"
-				"\"ifindex\": %u,"
-				"\"queue_id\": %u,"
-				"\"action\": %u,"
-				"\"label_id\": %u,"
-				"\"data_len\": %u,"
-				"\"src_ip\": \"%s\","
-				"\"dst_ip\": \"%s\","
-				"\"src_port\": %u,"
-				"\"dst_port\": %u"
-				"}",
-				j ? ", " : "",
-				(unsigned long long)pkt->timestamp_ns,
-				pkt->ifindex,
-				pkt->queue_id,
-				pkt->action,
-				pkt->label_id,
-				pkt->data_len,
-				src_ip,
-				dst_ip,
-				pkt->src_port,
-				pkt->dst_port);
-		}
+            fprintf(m,
+                    "%s{\"timestamp_ns\": %llu,\"ifindex\": %u,\"queue_id\": %u,\"action\": %u,\"label_id\": %u,\"data_len\": %u,\"src_ip\": \"%s\",\"dst_ip\": \"%s\",\"src_port\": %u,\"dst_port\": %u}",
+                    j ? ", " : "",
+                    (unsigned long long)pkt->timestamp_ns,
+                    pkt->ifindex,
+                    pkt->queue_id,
+                    pkt->action,
+                    pkt->label_id,
+                    pkt->data_len,
+                    src_ip,
+                    dst_ip,
+                    pkt->src_port,
+                    pkt->dst_port);
+        }
 
-		dprintf(fd, "] }");
-	}
+        fprintf(m, "] }");
+    }
 
-	dprintf(fd, "] }\n");
+    fprintf(m, "] }\n");
+    fflush(m);
+    fclose(m);
+
+    send_response_header_with_length(fd, "200 OK",
+                                     "application/json; charset=utf-8",
+                                     body_len);
+    if (body && body_len)
+        (void)send_all(fd, body, body_len);
+    free(body);
+    free(snapshot);
 }
 
 static void send_static_file(int fd, const char *static_dir,
@@ -184,8 +228,8 @@ static void send_static_file(int fd, const char *static_dir,
 	content_type = content_type_for_path(path);
 	send_response_header(fd, "200 OK", content_type);
 
-	while ((n = read(file_fd, buf, sizeof(buf))) > 0)
-		(void)send(fd, buf, (size_t)n, 0);
+    while ((n = read(file_fd, buf, sizeof(buf))) > 0)
+        (void)send_all(fd, buf, (size_t)n);
 
 	close(file_fd);
 }

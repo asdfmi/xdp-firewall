@@ -20,24 +20,19 @@
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #ifdef __has_include
-#if __has_include(<xdp/xsk.h>)
-#include <xdp/xsk.h>
-#elif __has_include(<bpf/xsk.h>)
-#include <bpf/xsk.h>
-#elif __has_include(<xsk.h>)
-#include <xsk.h>
-#else
-#error "AF_XDP headers not found"
+#if __has_include(<bpf/libbpf_version.h>)
+#include <bpf/libbpf_version.h>
 #endif
-#else
-#include <xdp/xsk.h>
 #endif
-
-#ifndef XDP_USE_NEED_WAKEUP
-#define XDP_USE_NEED_WAKEUP 0
+#ifndef LIBBPF_MAJOR_VERSION
+#define LIBBPF_MAJOR_VERSION 0
 #endif
-
 #include "xdp_telemetry.h"
+#include "telemetry_event.h"
+
+/* forward decl for ringbuf callback */
+static int meta_matches_filter(const struct xdp_telemetry_event_session *session,
+                   const struct xdp_label_meta *meta);
 
 struct xdp_telemetry_device {
 	char ifname[IF_NAMESIZE];
@@ -53,34 +48,56 @@ struct xdp_telemetry_rule_session {
 	int rules_map_fd;
 };
 
-#define XSK_FRAME_COUNT 1024u
-#define XSK_FRAME_SIZE 2048u
-#define XSK_RING_DEPTH 256u
-#define XSK_BATCH_SIZE 64u
-#define XSK_FRAME_HEADROOM 256u
-
 struct xdp_telemetry_event_session {
-	const struct xdp_telemetry_device *device;
-	int xsks_map_fd;
+    const struct xdp_telemetry_device *device;
+    int ringbuf_map_fd;
+    struct ring_buffer *ringbuf;
+    bool use_ringbuf;
+    __u32 queue_id;
 
-	struct xsk_umem *umem;
-	struct xsk_socket *xsk;
-	void *umem_area;
-	size_t umem_area_size;
-	__u32 queue_id;
+    xdp_telemetry_event_cb event_cb;
+    void *event_user_data;
 
-	struct xsk_ring_prod fq;
-	struct xsk_ring_cons cq;
-	struct xsk_ring_cons rx;
-	struct xsk_ring_prod tx;
-	int xsk_fd;
-
-	xdp_telemetry_event_cb event_cb;
-	void *event_user_data;
-
-	__u32 *event_filter_label_ids;
-	size_t event_filter_count;
+    __u32 *event_filter_label_ids;
+    size_t event_filter_count;
 };
+
+static int ringbuf_sample_cb(void *ctx, void *data, size_t size)
+{
+    struct xdp_telemetry_event_session *session = ctx;
+    const struct xdt_ringbuf_event *ev = data;
+    struct xdp_telemetry_packet pkt = {0};
+    size_t sample_len;
+
+    if (!session || !session->event_cb)
+        return 0;
+    if (!ev || size < sizeof(*ev))
+        return 0;
+
+    if (!meta_matches_filter(session, &ev->meta))
+        return 0;
+
+    sample_len = ev->data_len;
+    if (sample_len > XDT_RINGBUF_SAMPLE_SIZE)
+        sample_len = XDT_RINGBUF_SAMPLE_SIZE;
+
+    pkt.meta = ev->meta;
+    pkt.data = ev->sample;
+    pkt.data_len = sample_len;
+    pkt.timestamp_ns = ev->ts_ns; /* monotonic; good enough for display */
+    pkt.ifindex = session->device ? session->device->ifindex : 0;
+    pkt.queue_id = ev->queue_id;
+    pkt.forward_to_kernel = false; /* ringbuf path is mirror-only */
+    pkt.addr_family = ev->addr_family;
+    pkt.ip_proto = ev->ip_proto;
+    pkt.src_port = ev->src_port;
+    pkt.dst_port = ev->dst_port;
+    pkt.src_ipv4 = ev->src_ipv4;
+    pkt.dst_ipv4 = ev->dst_ipv4;
+
+    session->event_cb(&pkt, session->event_user_data);
+    return 0;
+}
 
 static const char *pin_root_or_default(const char *pin_root)
 {
@@ -150,44 +167,33 @@ static void close_rules_map_fd(struct xdp_telemetry_rule_session *session)
 	}
 }
 
-static void close_xsks_map_fd(struct xdp_telemetry_event_session *session)
+/* AF_XDP path removed in ringbuf-only mode */
+
+#if defined(LIBBPF_MAJOR_VERSION) && LIBBPF_MAJOR_VERSION >= 1
+#define HAVE_LIBBPF_XDP_ATTACH 1
+#endif
+
+static int attach_xdp_program(int ifindex, int prog_fd, __u32 flags)
 {
-	if (session && session->xsks_map_fd >= 0) {
-		close(session->xsks_map_fd);
-		session->xsks_map_fd = -1;
-	}
+#ifdef HAVE_LIBBPF_XDP_ATTACH
+	return bpf_xdp_attach(ifindex, prog_fd, flags, NULL);
+#else
+	return bpf_set_link_xdp_fd(ifindex, prog_fd, flags);
+#endif
 }
 
-static void detach_xsk_from_map(struct xdp_telemetry_event_session *session)
+static int detach_xdp_program(int ifindex, __u32 flags)
 {
-	if (!session || session->xsks_map_fd < 0)
-		return;
-
-	(void)bpf_map_delete_elem(session->xsks_map_fd, &session->queue_id);
+#ifdef HAVE_LIBBPF_XDP_ATTACH
+	return bpf_xdp_detach(ifindex, flags, NULL);
+#else
+	return bpf_set_link_xdp_fd(ifindex, -1, flags);
+#endif
 }
 
-static void destroy_event_transport(struct xdp_telemetry_event_session *session)
-{
-	if (!session)
-		return;
+/* AF_XDP path removed in ringbuf-only mode */
 
-	if (session->xsk) {
-		xsk_socket__delete(session->xsk);
-		session->xsk = NULL;
-	}
-	session->xsk_fd = -1;
-
-	if (session->umem) {
-		xsk_umem__delete(session->umem);
-		session->umem = NULL;
-	}
-
-	if (session->umem_area) {
-		free(session->umem_area);
-		session->umem_area = NULL;
-		session->umem_area_size = 0;
-	}
-}
+/* AF_XDP path removed in ringbuf-only mode */
 
 static void copy_string(char *dst, size_t dst_sz, const char *src)
 {
@@ -251,11 +257,10 @@ void xdp_telemetry_device_close(struct xdp_telemetry_device *device)
 int xdp_telemetry_device_attach(const struct xdp_telemetry_device *device)
 {
 	char rules_path[PATH_MAX];
-	char xsks_path[PATH_MAX];
-	struct bpf_object *obj = NULL;
+		struct bpf_object *obj = NULL;
 	struct bpf_program *prog;
 	struct bpf_map *rules_map;
-	struct bpf_map *xsks_map;
+    struct bpf_map *events_map;
 	int prog_fd;
 	const char *obj_path;
 	int err;
@@ -287,13 +292,13 @@ int xdp_telemetry_device_attach(const struct xdp_telemetry_device *device)
 		goto out_close;
 	}
 
-	xsks_map = bpf_object__find_map_by_name(obj, "xsks_map");
-	if (!xsks_map) {
-		fprintf(stderr,
-			"xdp_telemetry_attach: xsks_map not found in object\n");
-		err = -ENOENT;
-		goto out_close;
-	}
+    events_map = bpf_object__find_map_by_name(obj, "events");
+    if (!events_map) {
+        fprintf(stderr,
+                "xdp_telemetry_attach: events ringbuf map not found in object\n");
+        err = -ENOENT;
+        goto out_close;
+    }
 
 	if (device->pin_maps) {
 		err = build_map_path(device->pin_root, device->ifname,
@@ -310,18 +315,22 @@ int xdp_telemetry_device_attach(const struct xdp_telemetry_device *device)
 			goto out_close;
 		}
 
-		err = build_map_path(device->pin_root, device->ifname, "xsks",
-				     xsks_path, sizeof(xsks_path));
-		if (err) {
-			goto out_close;
-		}
-		unlink(xsks_path);
-		if (bpf_map__set_pin_path(xsks_map, xsks_path)) {
-			fprintf(stderr,
-				"xdp_telemetry_attach: failed to set pin path for xsks map\n");
-			err = -errno;
-			goto out_close;
-		}
+        /* Pin ringbuf events map */
+        {
+            char events_path[PATH_MAX];
+            err = build_map_path(device->pin_root, device->ifname, "events",
+                         events_path, sizeof(events_path));
+            if (err) {
+                goto out_close;
+            }
+            unlink(events_path);
+            if (bpf_map__set_pin_path(events_map, events_path)) {
+                fprintf(stderr,
+                        "xdp_telemetry_attach: failed to set pin path for events map\n");
+                err = -errno;
+                goto out_close;
+            }
+        }
 	}
 
 	err = bpf_object__load(obj);
@@ -343,7 +352,7 @@ int xdp_telemetry_device_attach(const struct xdp_telemetry_device *device)
 	flags = device->mode == XDP_TELEMETRY_ATTACH_MODE_NATIVE ?
 			XDP_FLAGS_DRV_MODE : XDP_FLAGS_SKB_MODE;
 
-	err = bpf_xdp_attach(device->ifindex, prog_fd, flags, NULL);
+	err = attach_xdp_program(device->ifindex, prog_fd, flags);
 	if (err)
 		goto out_close;
 
@@ -356,10 +365,10 @@ out_close:
 
 int xdp_telemetry_device_detach(const struct xdp_telemetry_device *device)
 {
-	char rules_path[PATH_MAX];
-	char xsks_path[PATH_MAX];
-	int flags;
-	int err;
+    char rules_path[PATH_MAX];
+        char events_path[PATH_MAX];
+    int flags;
+    int err;
 
 	if (!device || !device->ifindex)
 		return -EINVAL;
@@ -367,26 +376,26 @@ int xdp_telemetry_device_detach(const struct xdp_telemetry_device *device)
 	flags = device->mode == XDP_TELEMETRY_ATTACH_MODE_NATIVE ?
 			XDP_FLAGS_DRV_MODE : XDP_FLAGS_SKB_MODE;
 
-	err = bpf_xdp_detach(device->ifindex, flags, NULL);
+	err = detach_xdp_program(device->ifindex, flags);
 	if (err && err != -ENOENT && err != -ENODEV)
 		return err;
 
-	if (device->pin_maps) {
-		if (!build_map_path(device->pin_root, device->ifname, "rules_v4",
-				    rules_path, sizeof(rules_path)) &&
-		    unlink(rules_path) && errno != ENOENT) {
-			fprintf(stderr,
-				"xdp_telemetry_detach: warning: failed to unlink %s: %s\n",
-				rules_path, strerror(errno));
-		}
-		if (!build_map_path(device->pin_root, device->ifname, "xsks",
-				    xsks_path, sizeof(xsks_path)) &&
-		    unlink(xsks_path) && errno != ENOENT) {
-			fprintf(stderr,
-				"xdp_telemetry_detach: warning: failed to unlink %s: %s\n",
-				xsks_path, strerror(errno));
-		}
-	}
+    if (device->pin_maps) {
+        if (!build_map_path(device->pin_root, device->ifname, "rules_v4",
+                    rules_path, sizeof(rules_path)) &&
+            unlink(rules_path) && errno != ENOENT) {
+            fprintf(stderr,
+                    "xdp_telemetry_detach: warning: failed to unlink %s: %s\n",
+                    rules_path, strerror(errno));
+        }
+                if (!build_map_path(device->pin_root, device->ifname, "events",
+                    events_path, sizeof(events_path)) &&
+            unlink(events_path) && errno != ENOENT) {
+            fprintf(stderr,
+                    "xdp_telemetry_detach: warning: failed to unlink %s: %s\n",
+                    events_path, strerror(errno));
+        }
+    }
 
 	return 0;
 }
@@ -576,30 +585,30 @@ void xdp_telemetry_rule_list_free(struct xdp_telemetry_rule_list *list)
 	list->count = 0;
 }
 
-static int ensure_xsks_map(struct xdp_telemetry_event_session *session)
+static int ensure_events_map(struct xdp_telemetry_event_session *session)
 {
-	char path[PATH_MAX];
-	int fd;
-	int err;
+    char path[PATH_MAX];
+    int fd;
+    int err;
 
-	if (!session || !session->device)
-		return -EINVAL;
+    if (!session || !session->device)
+        return -EINVAL;
 
-	if (session->xsks_map_fd >= 0)
-		return session->xsks_map_fd;
+    if (session->ringbuf_map_fd >= 0)
+        return session->ringbuf_map_fd;
 
-	err = build_map_path(session->device->pin_root,
-			     session->device->ifname, "xsks", path,
-			     sizeof(path));
-	if (err)
-		return err;
+    err = build_map_path(session->device->pin_root,
+                 session->device->ifname, "events", path,
+                 sizeof(path));
+    if (err)
+        return err;
 
-	fd = bpf_obj_get(path);
-	if (fd < 0)
-		return -errno;
+    fd = bpf_obj_get(path);
+    if (fd < 0)
+        return -errno;
 
-	session->xsks_map_fd = fd;
-	return session->xsks_map_fd;
+    session->ringbuf_map_fd = fd;
+    return session->ringbuf_map_fd;
 }
 
 static int meta_matches_filter(const struct xdp_telemetry_event_session *session,
@@ -618,68 +627,6 @@ static int meta_matches_filter(const struct xdp_telemetry_event_session *session
 	return 0;
 }
 
-static int event_session_prepare_umem(struct xdp_telemetry_event_session *session)
-{
-	struct xsk_umem_config cfg = {
-		.fill_size = XSK_RING_DEPTH,
-		.comp_size = XSK_RING_DEPTH,
-		.frame_size = XSK_FRAME_SIZE,
-		.frame_headroom = XSK_FRAME_HEADROOM,
-		.flags = 0,
-	};
-	size_t size;
-	void *area;
-	int err;
-	int ret;
-
-	if (!session)
-		return -EINVAL;
-
-	size = (size_t)XSK_FRAME_SIZE * XSK_FRAME_COUNT;
-	ret = posix_memalign(&area, getpagesize(), size);
-	if (ret)
-		return -ret;
-
-	memset(area, 0, size);
-
-	err = xsk_umem__create(&session->umem, area, size,
-			       &session->fq, &session->cq, &cfg);
-	if (err) {
-		free(area);
-		session->umem = NULL;
-		return err;
-	}
-
-	session->umem_area = area;
-	session->umem_area_size = size;
-	return 0;
-}
-
-static int event_session_prime_fill_queue(struct xdp_telemetry_event_session *session)
-{
-	__u64 addr = 0;
-
-	while (addr < XSK_FRAME_COUNT) {
-		__u32 idx;
-		unsigned int chunk = XSK_FRAME_COUNT - addr;
-		unsigned int reserved;
-		unsigned int i;
-
-		reserved = xsk_ring_prod__reserve(&session->fq, chunk, &idx);
-		if (!reserved)
-			continue;
-
-		for (i = 0; i < reserved; i++)
-			*xsk_ring_prod__fill_addr(&session->fq, idx + i) =
-				(addr + i) * XSK_FRAME_SIZE;
-
-		xsk_ring_prod__submit(&session->fq, reserved);
-		addr += reserved;
-	}
-
-	return 0;
-}
-
 static __u64 realtime_now_ns(void)
 {
 	struct timespec ts;
@@ -690,151 +637,10 @@ static __u64 realtime_now_ns(void)
 	return (__u64)ts.tv_sec * 1000000000ULL + (__u64)ts.tv_nsec;
 }
 
-static void event_session_reclaim_tx(struct xdp_telemetry_event_session *session)
-{
-	__u64 addrs[XSK_BATCH_SIZE];
-	unsigned int idx_cq;
-	unsigned int completed;
-	unsigned int i;
-
-	if (!session)
-		return;
-
-	while ((completed = xsk_ring_cons__peek(&session->cq,
-						XSK_BATCH_SIZE, &idx_cq)) > 0) {
-		for (i = 0; i < completed; i++)
-			addrs[i] = *xsk_ring_cons__comp_addr(&session->cq,
-							     idx_cq + i);
-
-		xsk_ring_cons__release(&session->cq, completed);
-
-		for (i = 0; i < completed;) {
-			__u32 idx_fq;
-			unsigned int reserved =
-				xsk_ring_prod__reserve(&session->fq,
-						       completed - i,
-						       &idx_fq);
-			unsigned int j;
-
-			if (!reserved)
-				continue;
-
-			for (j = 0; j < reserved; j++)
-				*xsk_ring_prod__fill_addr(&session->fq,
-							  idx_fq + j) =
-					addrs[i + j];
-
-			xsk_ring_prod__submit(&session->fq, reserved);
-			i += reserved;
-		}
-	}
-}
-
-static int event_session_process_rx(struct xdp_telemetry_event_session *session)
-{
-	__u64 addrs[XSK_BATCH_SIZE];
-	__u32 lengths[XSK_BATCH_SIZE];
-	bool forward_flags[XSK_BATCH_SIZE];
-	unsigned int handled = 0;
-	__u32 idx_rx;
-	unsigned int rcvd;
-	unsigned int i;
-	bool kick_tx = false;
-
-	event_session_reclaim_tx(session);
-
-	rcvd = xsk_ring_cons__peek(&session->rx, XSK_BATCH_SIZE, &idx_rx);
-	if (!rcvd)
-		return 0;
-
-	for (i = 0; i < rcvd; i++) {
-		const struct xdp_desc *desc =
-			xsk_ring_cons__rx_desc(&session->rx, idx_rx + i);
-		__u64 base_addr = xsk_umem__extract_addr(desc->addr);
-		__u64 offset = xsk_umem__extract_offset(desc->addr);
-		unsigned char *base = xsk_umem__get_data(session->umem_area,
-							 base_addr);
-		unsigned char *data = base ? base + offset : NULL;
-		const struct xdp_label_meta *meta;
-		struct xdp_telemetry_packet packet = {0};
-
-		forward_flags[i] = false;
-		addrs[i] = desc->addr;
-		lengths[i] = desc->len;
-
-		if (!data)
-			continue;
-
-		meta = (const struct xdp_label_meta *)(data -
-						       sizeof(*meta));
-		if ((const void *)meta < session->umem_area)
-			continue;
-		if ((const void *)meta < (const void *)base)
-			continue;
-		if ((const unsigned char *)(meta + 1) > data)
-			continue;
-
-		if (!meta_matches_filter(session, meta))
-			continue;
-
-		if (!session->event_cb)
-			continue;
-
-		packet.meta = *meta;
-		packet.data = data;
-		packet.data_len = desc->len;
-		packet.timestamp_ns = realtime_now_ns();
-		packet.ifindex = session->device->ifindex;
-		packet.queue_id = session->queue_id;
-		packet.forward_to_kernel = false;
-
-		session->event_cb(&packet, session->event_user_data);
-		if (packet.forward_to_kernel)
-			forward_flags[i] = true;
-		handled++;
-	}
-
-	xsk_ring_cons__release(&session->rx, rcvd);
-
-	for (i = 0; i < rcvd; i++) {
-		if (forward_flags[i]) {
-			struct xdp_desc *tx_desc;
-			__u32 idx_tx;
-
-			while (!xsk_ring_prod__reserve(&session->tx, 1,
-						       &idx_tx))
-				event_session_reclaim_tx(session);
-
-			tx_desc = xsk_ring_prod__tx_desc(&session->tx, idx_tx);
-			tx_desc->addr = addrs[i];
-			tx_desc->len = lengths[i];
-
-			xsk_ring_prod__submit(&session->tx, 1);
-			if (xsk_ring_prod__needs_wakeup(&session->tx))
-				kick_tx = true;
-		} else {
-			__u32 idx_fq;
-
-			while (!xsk_ring_prod__reserve(&session->fq, 1,
-						       &idx_fq))
-				event_session_reclaim_tx(session);
-
-			*xsk_ring_prod__fill_addr(&session->fq, idx_fq) =
-				addrs[i];
-			xsk_ring_prod__submit(&session->fq, 1);
-		}
-	}
-
-	if (kick_tx && session->xsk_fd >= 0)
-		(void)sendto(session->xsk_fd, NULL, 0, MSG_DONTWAIT, NULL, 0);
-
-	return (int)handled;
-}
-
 int xdp_telemetry_event_session_open(const struct xdp_telemetry_device *device,
-				    struct xdp_telemetry_event_session **sessionp)
+                    struct xdp_telemetry_event_session **sessionp)
 {
-	struct xdp_telemetry_event_session *session;
+    struct xdp_telemetry_event_session *session;
 
 	if (!device || !sessionp)
 		return -EINVAL;
@@ -843,10 +649,11 @@ int xdp_telemetry_event_session_open(const struct xdp_telemetry_device *device,
 	if (!session)
 		return -ENOMEM;
 
-	session->device = device;
-	session->xsks_map_fd = -1;
-	session->queue_id = 0;
-	session->xsk_fd = -1;
+    session->device = device;
+    session->ringbuf_map_fd = -1;
+    session->ringbuf = NULL;
+    session->use_ringbuf = true;
+    session->queue_id = 0;
 
 	*sessionp = session;
 	return 0;
@@ -854,139 +661,91 @@ int xdp_telemetry_event_session_open(const struct xdp_telemetry_device *device,
 
 void xdp_telemetry_event_session_close(struct xdp_telemetry_event_session *session)
 {
-	if (!session)
-		return;
+    if (!session)
+        return;
 
-	xdp_telemetry_events_unsubscribe(session);
-	close_xsks_map_fd(session);
-	free(session);
+    xdp_telemetry_events_unsubscribe(session);
+    if (session->ringbuf_map_fd >= 0) {
+        close(session->ringbuf_map_fd);
+        session->ringbuf_map_fd = -1;
+    }
+    free(session);
 }
 
 int xdp_telemetry_events_subscribe(struct xdp_telemetry_event_session *session,
-				  const struct xdp_telemetry_event_filter *filter,
-				  xdp_telemetry_event_cb callback,
-				  void *user_data)
+                  const struct xdp_telemetry_event_filter *filter,
+                  xdp_telemetry_event_cb callback,
+                  void *user_data)
 {
-	struct xsk_socket_config xsk_cfg = {
-		.rx_size = XSK_RING_DEPTH,
-		.tx_size = XSK_RING_DEPTH,
-		.libbpf_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD,
-		.xdp_flags = 0,
-		.bind_flags = XDP_COPY | XDP_USE_NEED_WAKEUP,
-	};
-	int map_fd;
-	size_t bytes;
-	int err;
-	int xsk_fd;
+    /* Ringbuf (mirror) only */
+    int ev_map_fd;
+    size_t bytes;
 
-	if (!session || !session->device || !callback)
-		return -EINVAL;
-	if (session->xsk)
-		return -EALREADY;
+    if (!session || !session->device || !callback)
+        return -EINVAL;
+    if (session->ringbuf)
+        return -EALREADY;
 
-	map_fd = ensure_xsks_map(session);
-	if (map_fd < 0)
-		return map_fd;
+    ev_map_fd = ensure_events_map(session);
+    if (ev_map_fd < 0)
+        return ev_map_fd;
 
-	err = event_session_prepare_umem(session);
-	if (err)
-		goto err_cleanup_map;
+    session->event_cb = callback;
+    session->event_user_data = user_data;
 
-	err = xsk_socket__create(&session->xsk, session->device->ifname,
-				 session->queue_id, session->umem,
-				 &session->rx, &session->tx, &xsk_cfg);
-	if (err)
-		goto err_cleanup_transport;
+    free(session->event_filter_label_ids);
+    session->event_filter_label_ids = NULL;
+    session->event_filter_count = 0;
+    if (filter && filter->label_ids && filter->label_id_count) {
+        bytes = filter->label_id_count * sizeof(*filter->label_ids);
+        session->event_filter_label_ids = malloc(bytes);
+        if (!session->event_filter_label_ids)
+            return -ENOMEM;
+        memcpy(session->event_filter_label_ids, filter->label_ids, bytes);
+        session->event_filter_count = filter->label_id_count;
+    }
 
-	err = event_session_prime_fill_queue(session);
-	if (err)
-		goto err_cleanup_transport;
-
-	xsk_fd = xsk_socket__fd(session->xsk);
-	if (bpf_map_update_elem(map_fd, &session->queue_id, &xsk_fd, 0) < 0) {
-		err = -errno;
-		goto err_cleanup_transport;
-	}
-	session->xsk_fd = xsk_fd;
-
-	session->event_cb = callback;
-	session->event_user_data = user_data;
-
-	free(session->event_filter_label_ids);
-	session->event_filter_label_ids = NULL;
-	session->event_filter_count = 0;
-
-	if (filter && filter->label_ids && filter->label_id_count) {
-		bytes = filter->label_id_count * sizeof(*filter->label_ids);
-		session->event_filter_label_ids = malloc(bytes);
-		if (!session->event_filter_label_ids) {
-			err = -ENOMEM;
-			goto err_cleanup_transport;
-		}
-		memcpy(session->event_filter_label_ids, filter->label_ids, bytes);
-		session->event_filter_count = filter->label_id_count;
-	}
-
-	return 0;
-
-err_cleanup_transport:
-	detach_xsk_from_map(session);
-	destroy_event_transport(session);
-err_cleanup_map:
-	close_xsks_map_fd(session);
-	return err;
+    session->ringbuf = ring_buffer__new(ev_map_fd, ringbuf_sample_cb, session, NULL);
+    if (!session->ringbuf)
+        return -errno;
+    session->use_ringbuf = true;
+    session->ringbuf_map_fd = ev_map_fd;
+    return 0;
 }
 
 int xdp_telemetry_events_poll(struct xdp_telemetry_event_session *session,
-			     int timeout_ms)
+                 int timeout_ms)
 {
-	int processed;
-
-	if (!session || !session->xsk)
-		return -EINVAL;
-
-	processed = event_session_process_rx(session);
-	if (processed < 0)
-		return processed;
-	if (processed > 0)
-		return 0;
-
-	if (timeout_ms != 0) {
-		struct pollfd pfd = {
-			.fd = xsk_socket__fd(session->xsk),
-			.events = POLLIN,
-		};
-		int poll_ret = poll(&pfd, 1, timeout_ms);
-
-		if (poll_ret < 0)
-			return -errno;
-		if (poll_ret == 0)
-			return 0;
-		if (pfd.revents & POLLERR)
-			return -EIO;
-	}
-
-	processed = event_session_process_rx(session);
-	if (processed < 0)
-		return processed;
-	return 0;
+    if (!session || !session->ringbuf)
+        return -EINVAL;
+    {
+        int ret = ring_buffer__poll(session->ringbuf, timeout_ms);
+        if (ret < 0)
+            return ret; /* libbpf-style negative error */
+        return 0;
+    }
 }
 
 int xdp_telemetry_events_unsubscribe(struct xdp_telemetry_event_session *session)
 {
-	if (!session)
-		return -EINVAL;
+    if (!session)
+        return -EINVAL;
 
-	detach_xsk_from_map(session);
-	destroy_event_transport(session);
-	close_xsks_map_fd(session);
-	session->event_cb = NULL;
-	session->event_user_data = NULL;
-	free(session->event_filter_label_ids);
-	session->event_filter_label_ids = NULL;
-	session->event_filter_count = 0;
+    if (session->ringbuf) {
+        ring_buffer__free(session->ringbuf);
+        session->ringbuf = NULL;
+    }
+    if (session->ringbuf_map_fd >= 0) {
+        close(session->ringbuf_map_fd);
+        session->ringbuf_map_fd = -1;
+    }
+    session->event_cb = NULL;
+    session->event_user_data = NULL;
+    free(session->event_filter_label_ids);
+    session->event_filter_label_ids = NULL;
+    session->event_filter_count = 0;
 
-	return 0;
+    return 0;
 }
 
 int xdp_telemetry_stats_get(struct xdp_telemetry_rule_session *session,

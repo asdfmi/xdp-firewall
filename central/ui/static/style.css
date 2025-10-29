@@ -87,6 +87,11 @@ section {
 .charts {
   display: grid;
   gap: 1rem;
+  grid-template-columns: 1fr;
+}
+
+.chart-wrapper {
+  width: 100%;
 }
 
 .chart-wrapper h4 {
@@ -131,7 +136,8 @@ footer {
   color: #64748b;
 }
 
-@media (min-width: 900px) {
+/* Keep single column on typical widths to maximize chart width. */
+@media (min-width: 1600px) {
   .nodes {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

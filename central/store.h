@@ -5,7 +5,7 @@
 
 #include "telemetry/telemetry.h"
 
-#define TELEMETRY_STORE_MAX_EVENTS 128
+#define TELEMETRY_STORE_MAX_EVENTS 256
 #define TELEMETRY_STORE_MAX_LABELS 128
 #define TELEMETRY_STORE_MAX_NODES 32
 

@@ -1,0 +1,29 @@
+KIND ?= kind
+KUBECTL ?= kubectl
+MAKE ?= make
+
+KIND_CLUSTER_NAME ?= xdt
+DOCKER_IMAGE_PREFIX ?= xdt
+DOCKER_IMAGE_TAG ?= latest
+
+.PHONY: kind-up
+kind-up:
+	KIND="$(KIND)" KUBECTL="$(KUBECTL)" MAKE="$(MAKE)" KIND_CLUSTER_NAME="$(KIND_CLUSTER_NAME)" \
+		./scripts/kind-up.sh
+
+.PHONY: kind-down
+kind-down:
+	$(KIND) delete cluster --name $(KIND_CLUSTER_NAME)
+
+.PHONY: kind-docker-images
+kind-docker-images:
+	$(MAKE) DOCKER_IMAGE_PREFIX=$(DOCKER_IMAGE_PREFIX) \
+		DOCKER_IMAGE_TAG=$(DOCKER_IMAGE_TAG) docker-images
+
+.PHONY: kind-docker-load
+kind-docker-load: kind-docker-images
+	$(KIND) load docker-image \
+		$(DOCKER_IMAGE_PREFIX)-agent:$(DOCKER_IMAGE_TAG) \
+		$(DOCKER_IMAGE_PREFIX)-central:$(DOCKER_IMAGE_TAG) \
+		$(DOCKER_IMAGE_PREFIX)-service:$(DOCKER_IMAGE_TAG) \
+		$(DOCKER_IMAGE_PREFIX)-xdt:$(DOCKER_IMAGE_TAG) --name $(KIND_CLUSTER_NAME)

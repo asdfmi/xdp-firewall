@@ -32,9 +32,9 @@ static int cleanup_pin_root(const char *pin_root, const char *ifname,
 	if (!pin_root || !pin_root[0] || !ifname || !ifname[0])
 		return 0;
 
-	if (snprintf(path, sizeof(path), "%s/%s_xsks", pin_root, ifname) >=
-	    (int)sizeof(path))
-		return -ENAMETOOLONG;
+    if (snprintf(path, sizeof(path), "%s/%s_events", pin_root, ifname) >=
+        (int)sizeof(path))
+        return -ENAMETOOLONG;
 	if (unlink(path) && errno != ENOENT) {
 		fprintf(stderr,
 			"test_attach: warning: failed to unlink %s: %s\n", path,
@@ -78,7 +78,7 @@ int main(void)
 	char tmp_bpffs_template[] = "/tmp/xdp_telemetry_bpffs.XXXXXX";
 	char *pin_root = NULL;
 	bool pin_root_is_tmp_mount = false;
-	char xsks_path[PATH_MAX];
+    char events_path[PATH_MAX];
 	char rules_path[PATH_MAX];
 	const char *ifname = "lo";
 	bool attached = false;
@@ -132,19 +132,19 @@ int main(void)
 	}
 	attached = true;
 
-	if (snprintf(xsks_path, sizeof(xsks_path), "%s/%s_xsks",
-		     pin_root, ifname) >= (int)sizeof(xsks_path)) {
-		fprintf(stderr,
-			"test_attach: xsks path truncated unexpectedly\n");
-		goto out;
-	}
+    if (snprintf(events_path, sizeof(events_path), "%s/%s_events",
+             pin_root, ifname) >= (int)sizeof(events_path)) {
+        fprintf(stderr,
+            "test_attach: events path truncated unexpectedly\n");
+        goto out;
+    }
 
-	if (access(xsks_path, F_OK) != 0) {
-		fprintf(stderr,
-			"test_attach: expected xsks map to be pinned at %s\n",
-			xsks_path);
-		goto out;
-	}
+    if (access(events_path, F_OK) != 0) {
+        fprintf(stderr,
+            "test_attach: expected events map to be pinned at %s\n",
+            events_path);
+        goto out;
+    }
 
 	if (snprintf(rules_path, sizeof(rules_path), "%s/%s_rules_v4",
 		     pin_root, ifname) >= (int)sizeof(rules_path)) {
@@ -167,12 +167,12 @@ int main(void)
 	}
 	attached = false;
 
-	if (access(xsks_path, F_OK) == 0) {
-		fprintf(stderr,
-			"test_attach: expected xsks map %s to be removed\n",
-			xsks_path);
-		goto out;
-	}
+    if (access(events_path, F_OK) == 0) {
+        fprintf(stderr,
+            "test_attach: expected events map %s to be removed\n",
+            events_path);
+        goto out;
+    }
 	if (access(rules_path, F_OK) == 0) {
 		fprintf(stderr,
 			"test_attach: expected rules map %s to be removed\n",

@@ -1,5 +1,7 @@
 const METRICS_URL = '/metrics.json';
-const REFRESH_INTERVAL_MS = 1000;
+const REFRESH_INTERVAL_MS = 1000; // refresh every second for near-real-time updates
+const TIMELINE_BUCKET_SEC = 1;    // 1-second buckets
+const TIMELINE_WINDOW_SEC = 30;   // show last 30s
 
 const totalEventsEl = document.getElementById('total-events');
 const updatedAtEl = document.getElementById('updated-at');
@@ -48,67 +50,34 @@ function createEventsTable(events) {
 function setupCanvas(canvas, height) {
   const parentWidth = canvas.parentElement ? canvas.parentElement.clientWidth : 600;
   const devicePixelRatio = window.devicePixelRatio || 1;
+  const cssWidth = Math.max(parentWidth, 320);
   const cssHeight = height;
 
+  // Ensure CSS size matches the logical drawing size to avoid browser upscaling blur
+  canvas.style.width = `${cssWidth}px`;
   canvas.style.height = `${cssHeight}px`;
-  canvas.width = Math.max(parentWidth, 320) * devicePixelRatio;
-  canvas.height = cssHeight * devicePixelRatio;
+
+  // Backing store in device pixels for crisp rendering on HiDPI displays
+  canvas.width = Math.round(cssWidth * devicePixelRatio);
+  canvas.height = Math.round(cssHeight * devicePixelRatio);
 
   const ctx = canvas.getContext('2d');
+  // Reset transform, then scale to device pixels
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.scale(devicePixelRatio, devicePixelRatio);
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.clearRect(0, 0, cssWidth, cssHeight);
 
-  return { ctx, width: canvas.width / devicePixelRatio, height: cssHeight };
+  return { ctx, width: cssWidth, height: cssHeight };
 }
 
-function drawBarChart(canvas, labelCounts) {
-  const { ctx, width, height } = setupCanvas(canvas, 220);
-  ctx.fillStyle = '#cbd5f5';
-  ctx.font = '12px sans-serif';
-
-  if (!labelCounts.length) {
-    ctx.fillStyle = '#94a3b8';
-    ctx.fillText('No label data yet', 16, height / 2);
-    return;
-  }
-
-  const padding = 40;
-  const chartWidth = width - padding * 2;
-  const chartHeight = height - padding * 2;
-  const maxCount = Math.max(...labelCounts.map((entry) => entry.count)) || 1;
-  const barGap = 12;
-  const barWidth = (chartWidth - barGap * (labelCounts.length - 1)) / labelCounts.length;
-
-  ctx.strokeStyle = 'rgba(148, 163, 184, 0.3)';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(padding, padding);
-  ctx.lineTo(padding, padding + chartHeight);
-  ctx.lineTo(padding + chartWidth, padding + chartHeight);
-  ctx.stroke();
-
-  labelCounts.forEach((entry, index) => {
-    const barHeight = (entry.count / maxCount) * chartHeight;
-    const x = padding + index * (barWidth + barGap);
-    const y = padding + chartHeight - barHeight;
-
-    const gradient = ctx.createLinearGradient(x, y, x, y + barHeight);
-    gradient.addColorStop(0, '#60a5fa');
-    gradient.addColorStop(1, '#38bdf8');
-    ctx.fillStyle = gradient;
-    ctx.fillRect(x, y, barWidth, barHeight);
-
-    ctx.fillStyle = '#e2e8f0';
-    ctx.fillText(String(entry.label_id), x + barWidth / 2 - 6, padding + chartHeight + 14);
-    ctx.fillStyle = '#cbd5f5';
-    ctx.fillText(formatNumber(entry.count), x, y - 4);
-  });
-}
+// Label distribution chart removed per requirements.
 
 function drawTimelineChart(canvas, events) {
-  const { ctx, width, height } = setupCanvas(canvas, 180);
+  const { ctx, width, height } = setupCanvas(canvas, 260);
   ctx.fillStyle = '#cbd5f5';
   ctx.font = '12px sans-serif';
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
 
   if (!events.length) {
     ctx.fillStyle = '#94a3b8';
@@ -116,17 +85,32 @@ function drawTimelineChart(canvas, events) {
     return;
   }
 
+  // Fixed 1s buckets over a 30s sliding window, aligned to wall clock time
+  const BUCKET_MS = TIMELINE_BUCKET_SEC * 1000;
+  const WINDOW_MS = TIMELINE_WINDOW_SEC * 1000;
+  const bucketCount = Math.max(1, Math.floor(WINDOW_MS / BUCKET_MS));
+  const nowMs = Date.now();
+  const minMs = nowMs - WINDOW_MS;
+
+  const counts = new Array(bucketCount).fill(0);
+  events.forEach((evt) => {
+    const tsMs = Math.floor((evt.timestamp_ns || 0) / 1_000_000);
+    if (tsMs < minMs) return;
+    const idx = Math.floor((tsMs - minMs) / BUCKET_MS);
+    if (idx >= 0 && idx < bucketCount) counts[idx] += 1;
+  });
+
+  const points = counts.map((count, idx) => ({ idx, count }));
+  console.log('timeline buckets', points, 'bucket_ms', BUCKET_MS);
+
   const padding = 40;
   const chartWidth = width - padding * 2;
   const chartHeight = height - padding * 2;
 
-  const recent = events.slice(-30);
-  const times = recent.map((evt) => evt.timestamp_ns);
-  const lengths = recent.map((evt) => evt.data_len || 0);
-  const minTime = Math.min(...times);
-  const maxTime = Math.max(...times);
-  const timeRange = Math.max(maxTime - minTime, 1);
-  const maxLength = Math.max(...lengths, 1);
+  const minBucket = 0;
+  const maxBucket = points.length - 1;
+  const bucketRange = Math.max(1, maxBucket - minBucket);
+  const maxCount = Math.max(...points.map((p) => p.count), 1);
 
   ctx.strokeStyle = 'rgba(148, 163, 184, 0.3)';
   ctx.lineWidth = 1;
@@ -136,13 +120,19 @@ function drawTimelineChart(canvas, events) {
   ctx.lineTo(padding + chartWidth, padding + chartHeight);
   ctx.stroke();
 
+  ctx.fillStyle = '#94a3b8';
+  ctx.fillText(`Events / ${TIMELINE_BUCKET_SEC}s`, padding, padding - 12);
+
   ctx.strokeStyle = '#38bdf8';
   ctx.lineWidth = 2;
   ctx.beginPath();
 
-  recent.forEach((evt, index) => {
-    const x = padding + ((evt.timestamp_ns - minTime) / timeRange) * chartWidth;
-    const y = padding + chartHeight - ((evt.data_len || 0) / maxLength) * chartHeight;
+  points.forEach((point, index) => {
+    const normalizedX = bucketRange === 0
+      ? (points.length === 1 ? 0.5 : index / (points.length - 1))
+      : (point.idx - minBucket) / bucketRange;
+    const x = padding + normalizedX * chartWidth;
+    const y = padding + chartHeight - (point.count / maxCount) * chartHeight;
     if (index === 0) {
       ctx.moveTo(x, y);
     } else {
@@ -153,9 +143,12 @@ function drawTimelineChart(canvas, events) {
   ctx.stroke();
 
   ctx.fillStyle = '#60a5fa';
-  recent.forEach((evt) => {
-    const x = padding + ((evt.timestamp_ns - minTime) / timeRange) * chartWidth;
-    const y = padding + chartHeight - ((evt.data_len || 0) / maxLength) * chartHeight;
+  points.forEach((point, index) => {
+    const normalizedX = bucketRange === 0
+      ? (points.length === 1 ? 0.5 : index / (points.length - 1))
+      : (point.idx - minBucket) / bucketRange;
+    const x = padding + normalizedX * chartWidth;
+    const y = padding + chartHeight - (point.count / maxCount) * chartHeight;
     ctx.beginPath();
     ctx.arc(x, y, 3, 0, Math.PI * 2);
     ctx.fill();
@@ -190,16 +183,6 @@ function renderNodes(nodes) {
     const charts = document.createElement('div');
     charts.className = 'charts';
 
-    const labelWrapper = document.createElement('div');
-    labelWrapper.className = 'chart-wrapper';
-    const labelTitle = document.createElement('h4');
-    labelTitle.textContent = 'Label Distribution';
-    const labelCanvas = document.createElement('canvas');
-    labelCanvas.className = 'chart';
-    labelWrapper.appendChild(labelTitle);
-    labelWrapper.appendChild(labelCanvas);
-    charts.appendChild(labelWrapper);
-
     const timelineWrapper = document.createElement('div');
     timelineWrapper.className = 'chart-wrapper';
     const timelineTitle = document.createElement('h4');
@@ -215,17 +198,18 @@ function renderNodes(nodes) {
     eventsTitle.style.margin = '0';
     eventsTitle.style.fontSize = '1rem';
 
-    const eventsTable = createEventsTable((node.recent_events || []).slice(-10));
+    const recentEvents = node.recent_events || [];
+    const eventsTable = createEventsTable(recentEvents.slice(-10));
 
     card.appendChild(header);
     card.appendChild(charts);
     card.appendChild(eventsTitle);
     card.appendChild(eventsTable);
 
-    drawBarChart(labelCanvas, node.label_counts || []);
-    drawTimelineChart(timelineCanvas, node.recent_events || []);
-
     nodesContainer.appendChild(card);
+    requestAnimationFrame(() => {
+      drawTimelineChart(timelineCanvas, recentEvents);
+    });
   });
 }
 
@@ -242,10 +226,18 @@ function renderMetrics(data) {
 async function refreshMetrics() {
   try {
     const response = await fetch(METRICS_URL, { cache: 'no-store' });
+    const text = await response.text();
+    console.log('metrics raw response:', text);
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
-    const data = await response.json();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      console.error('JSON parse failed:', e);
+      throw e;
+    }
     renderMetrics(data);
   } catch (err) {
     console.error('Failed to fetch metrics:', err);

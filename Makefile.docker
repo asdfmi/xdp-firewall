@@ -1,0 +1,24 @@
+DOCKER ?= docker
+DOCKER_BUILD_FLAGS ?=
+DOCKER_IMAGE_REGISTRY ?=
+DOCKER_IMAGE_PREFIX ?= xdt
+DOCKER_IMAGE_TAG ?= latest
+DOCKER_TARGETS := agent central service xdt
+IMAGE_TARGETS := $(DOCKER_TARGETS:%=image-%)
+
+VMLINUX_HEADER ?= xdp/include/vmlinux.h
+
+.PHONY: docker-images $(IMAGE_TARGETS)
+
+docker-images: $(IMAGE_TARGETS)
+
+$(IMAGE_TARGETS): image-%: $(VMLINUX_HEADER)
+	@set -e; \
+	tgt="$*"; \
+	case " $(DOCKER_TARGETS) " in \
+	*" $$tgt "*) ;; \
+	*) echo "Unknown docker target '$$tgt'"; exit 1;; \
+	esac; \
+	image="$(if $(DOCKER_IMAGE_REGISTRY),$(DOCKER_IMAGE_REGISTRY)/,)$(DOCKER_IMAGE_PREFIX)-$$tgt:$(DOCKER_IMAGE_TAG)"; \
+	echo "==> Building $$image (target $$tgt)"; \
+	$(DOCKER) build $(DOCKER_BUILD_FLAGS) --target $$tgt -t $$image .

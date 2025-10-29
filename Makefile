@@ -4,7 +4,7 @@ BPF_ARCH ?= x86
 CC ?= gcc
 CXX ?= g++
 
-CFLAGS ?= -g -O2 -Wall -Wextra -std=c11
+CFLAGS ?= -g -O2 -Wall -Wextra -std=gnu11
 CXXFLAGS ?= -g -O2 -Wall -Wextra -std=c++17
 CPPFLAGS ?=
 
@@ -32,15 +32,9 @@ endif
 
 THREAD_LDLIBS ?= -pthread
 
-DOCKER ?= docker
-DOCKER_BUILD_FLAGS ?=
-DOCKER_IMAGE_REGISTRY ?=
-DOCKER_IMAGE_PREFIX ?= xdt
-DOCKER_IMAGE_TAG ?= latest
-DOCKER_TARGETS := agent central service xdt
-
 BPFTARGET := build/xdp.bpf.o
 BPF_SRC := xdp/bpf/xdp.bpf.c
+VMLINUX_HEADER ?= xdp/include/vmlinux.h
 
 COMMON_CLI_SOURCES := \
 	common/cli/params.c
@@ -116,10 +110,11 @@ build/tests/integration: | build/tests
 $(OBJDIR):
 	@mkdir -p $(OBJDIR)
 
-build/vmlinux.h: | build
-	bpftool btf dump file /sys/kernel/btf/vmlinux format c > $@
+ifeq ($(wildcard $(VMLINUX_HEADER)),)
+$(error $(VMLINUX_HEADER) is missing; generate it via 'bpftool btf dump file /sys/kernel/btf/vmlinux format c > $(VMLINUX_HEADER)')
+endif
 
-$(BPFTARGET): $(BPF_SRC) xdp/include/label_meta.h xdp/include/rule.h build/vmlinux.h | build
+$(BPFTARGET): $(BPF_SRC) xdp/include/label_meta.h xdp/include/rule.h xdp/include/telemetry_event.h $(VMLINUX_HEADER) | build
 	$(BPF_CLANG) -g -O2 -target bpf \
 		-D__TARGET_ARCH_$(BPF_ARCH) \
 		-Ibuild -Ixdp/include -I. \
@@ -179,11 +174,5 @@ cleanup:
 	@$(MAKE) clean
 	@$(MAKE) all
 
-.PHONY: docker-images
-docker-images: build/vmlinux.h
-	@set -e; \
-	for tgt in $(DOCKER_TARGETS); do \
-		image="$(if $(DOCKER_IMAGE_REGISTRY),$(DOCKER_IMAGE_REGISTRY)/,)$(DOCKER_IMAGE_PREFIX)-$$tgt:$(DOCKER_IMAGE_TAG)"; \
-		echo "==> Building $$image (target $$tgt)"; \
-		$(DOCKER) build $(DOCKER_BUILD_FLAGS) --target $$tgt -t $$image .; \
-	done
+-include Makefile.docker
+-include Makefile.kind
